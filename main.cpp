@@ -24,6 +24,13 @@ using namespace DirectX;
 
 const float PI = 3.141592f;
 
+enum Scene {
+	Title,
+	GameScene,
+	GameClear,
+	GmaeOver
+};
+
 //定数バッファ用データ構造体(マテリアル)
 struct ConstBufferDataMaterial {
 	XMFLOAT4 color;		//色(RGBA)
@@ -409,6 +416,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 	//描画初期化処理 ここから
 	// 
+	Scene scene = Scene::Title;
 
 	//重力
 	float gravity = -1.0f;
@@ -803,6 +811,19 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 		//}
 	}
 
+	//3Dオブジェクトの数
+	const size_t kBlockCount = 10;
+	//3Dオブジェクトの配列
+	Object3d block3ds[kBlockCount];
+
+	for (int i = 0; i < _countof(block3ds); i++) {
+		//初期化
+		InitializeObject3d(&block3ds[i], device.Get());
+
+		block3ds[0].position = { 10,10,0 };
+		block3ds[0].scale = { 2.0,2.0,2.0 };
+
+	}
 
 	////平行投影行列の計算
 	//constMapTransform->mat = XMMatrixOrthographicOffCenterLH(
@@ -1088,211 +1109,441 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 			break;
 		}
 		//DirectX毎フレーム処理 ここから
+		//シーン管理
+		if (scene ==Scene::Title) {
+			// キーボード情報の取得開始
+			keyboard->Acquire();
 
-		// キーボード情報の取得開始
-		keyboard->Acquire();
-
-		// 全キーの入力状態を取得する
-		BYTE key[256] = {};
-		keyboard->GetDeviceState(sizeof(key), key);
-
-
-
-		// バックバッファの番号を取得(2つなので0番か1番)
-		UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
-		// 1.リソースバリアで書き込み可能に変更
-		D3D12_RESOURCE_BARRIER barrierDesc{};
-		barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
-		barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
-		barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
-		commandList->ResourceBarrier(1, &barrierDesc);
-
-		// 2.描画先の変更
-		// レンダーターゲットビューのハンドルを取得
-		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
-		rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
-		//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
-		D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
-		commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
+			// 全キーの入力状態を取得する
+			BYTE key[256] = {};
+			keyboard->GetDeviceState(sizeof(key), key);
 
 
 
+			// バックバッファの番号を取得(2つなので0番か1番)
+			UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
+			// 1.リソースバリアで書き込み可能に変更
+			D3D12_RESOURCE_BARRIER barrierDesc{};
+			barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
+			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
+			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
+			commandList->ResourceBarrier(1, &barrierDesc);
 
-		// 3.画面クリア R G B A
-		FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
-		//スペースキーが押されたら
-		if (key[DIK_SPACE]) {
-			clearColor[0] = { 0.7f };
-		}
-		commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-		commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-		for (int i = 0; i < _countof(indices) / 3; i++)
-		{//三角形1つごとに計算していく
-			//三角形のインデックスを取り出して、一時的な変数に入れる
-			unsigned short indices0 = indices[i * 3 + 0];
-			unsigned short indices1 = indices[i * 3 + 1];
-			unsigned short indices2 = indices[i * 3 + 2];
-			//三角形を構成する頂点座標をベクトルに代入
-			XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
-			XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
-			XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
-			//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
-			XMVECTOR v1 = XMVectorSubtract(p1, p0);
-			XMVECTOR v2 = XMVectorSubtract(p2, p0);
-			//外積は両方から垂直なベクトル
-			XMVECTOR normal = XMVector3Cross(v1, v2);
-			//正規化(長さを1にする)
-			normal = XMVector3Normalize(normal);
-			//求めた法線を頂点データに代入
-			XMStoreFloat3(&vertices[indices0].normal, normal);
-			XMStoreFloat3(&vertices[indices1].normal, normal);
-			XMStoreFloat3(&vertices[indices2].normal, normal);
-		}
-
-		// 全頂点に対して
-		for (int i = 0; i < _countof(vertices); i++) {
-			vertMap[i] = vertices[i]; // 座標をコピー
-		}
+			// 2.描画先の変更
+			// レンダーターゲットビューのハンドルを取得
+			D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+			rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
+			//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
+			D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+			commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
 
 
 
-		//カメラ
-		if (key[DIK_D] || key[DIK_A]) {
-			if (key[DIK_D]) {
-				angle += XMConvertToRadians(1.0f);
-			}
-			else if (key[DIK_A]) {
-				angle -= XMConvertToRadians(1.0f);
-			}
-			//angleラジアンだけY軸周りに回転。半径は-100
-			eye.x = -100 * sinf(angle);
-			eye.z = -100 * cosf(angle);
-			//ビュー変換行列
-			matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-		}
+
+			// 3.画面クリア R G B A
+			FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
+
+			////スペースキーが押されたら
+			//if (key[DIK_SPACE]) {
+			//	clearColor[0] = { 0.7f };
+			//}
 
 
+			commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+			commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-		//座標操作
-
-		isUp = 0;
-
-		if (key[DIK_UP] || key[DIK_DOWN] || key[DIK_RIGHT] || key[DIK_LEFT] || key[DIK_SPACE])
-		{
-			if (key[DIK_UP]) { object3ds[0].position.z += 1.0f; }
-			else if (key[DIK_DOWN]) { object3ds[0].position.z -= 1.0f; }
-			if (key[DIK_RIGHT]) { object3ds[0].position.x += 1.0f; }
-			else if (key[DIK_LEFT]) { object3ds[0].position.x -= 1.0f; }
-			if (key[DIK_SPACE]) { isUp = 1; }
-		}
-		if (isUp == 0) {
-			object3ds[0].position.y += gravity;
-		}
-		else if (isUp == 1) {
-			object3ds[0].position.y -= gravity;
-		}
-
-		for (size_t i = 0; i < _countof(object3ds); i++)
-		{
-			UpdateObject3d(&object3ds[i], matView, matProjection);
-		}
-
-
-		// 4.描画コマンドここから
-
-		// ビューポート設定コマンド
-		D3D12_VIEWPORT viewport{};
-		viewport.Width = window_width;
-		viewport.Height = window_height;
-		viewport.TopLeftX = 0;
-		viewport.TopLeftY = 0;
-		viewport.MinDepth = 0.0f;
-		viewport.MaxDepth = 1.0f;
-		// ビューポート設定コマンドを、コマンドリストに積む
-		commandList->RSSetViewports(1, &viewport);
-
-		// シザー矩形
-		D3D12_RECT scissorRect{};
-		scissorRect.left = 0;                                       // 切り抜き座標左
-		scissorRect.right = window_width;        // 切り抜き座標右
-		scissorRect.top = 0;                                        // 切り抜き座標上
-		scissorRect.bottom = window_height;		// 切り抜き座標下
-
-
-
-		// シザー矩形設定コマンドを、コマンドリストに積む
-		commandList->RSSetScissorRects(1, &scissorRect);
-
-		// パイプラインステートとルートシグネチャの設定コマンド
-		commandList->SetPipelineState(pipelineState.Get());
-		commandList->SetGraphicsRootSignature(rootSignature.Get());
-
-		// プリミティブ形状の設定コマンド
-		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
-
-		// 頂点バッファビューの設定コマンド
-		commandList->IASetVertexBuffers(0, 1, &vbView);
-
-		// 定数バッファビュー(CBV)の設定コマンド
-		commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
-
-		ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
-		// SRVヒープの設定コマンド
-		commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-		// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
-		D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
-		//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
-		srvGpuHandle.ptr += incrementSize;
-		// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-		commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-
-		// インデックスバッファビューの設定コマンド
-		commandList->IASetIndexBuffer(&ibView);
-
-
-		//全オブジェクトについて処理
-		for (int i = 0; i < _countof(object3ds); i++) {
-			DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-		}
-
-		// 4.描画コマンドここまで
-
-		// 5.リソースバリアを戻す
-		barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
-		barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
-		commandList->ResourceBarrier(1, &barrierDesc);
-
-		// 命令のクローズ
-		result = commandList->Close();
-		assert(SUCCEEDED(result));
-		// コマンドリストの実行
-		ID3D12CommandList* commandLists[] = { commandList.Get() };
-		commandQueue->ExecuteCommandLists(1, commandLists);
-		// 画面に表示するバッファをフリップ(裏表の入替え)
-		result = swapChain->Present(1, 0);
-		assert(SUCCEEDED(result));
-
-		// コマンドの実行完了を待つ
-		commandQueue->Signal(fence.Get(), ++fenceVal);
-		if (fence->GetCompletedValue() != fenceVal) {
-			HANDLE event = CreateEvent(nullptr, false, false, nullptr);
-			if (event == NULL) {
+			for (int i = 0; i < _countof(indices) / 3; i++)
+			{
+				//三角形1つごとに計算していく
+				//三角形のインデックスを取り出して、一時的な変数に入れる
+				unsigned short indices0 = indices[i * 3 + 0];
+				unsigned short indices1 = indices[i * 3 + 1];
+				unsigned short indices2 = indices[i * 3 + 2];
+				//三角形を構成する頂点座標をベクトルに代入
+				XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
+				XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
+				XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
+				//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
+				XMVECTOR v1 = XMVectorSubtract(p1, p0);
+				XMVECTOR v2 = XMVectorSubtract(p2, p0);
+				//外積は両方から垂直なベクトル
+				XMVECTOR normal = XMVector3Cross(v1, v2);
+				//正規化(長さを1にする)
+				normal = XMVector3Normalize(normal);
+				//求めた法線を頂点データに代入
+				XMStoreFloat3(&vertices[indices0].normal, normal);
+				XMStoreFloat3(&vertices[indices1].normal, normal);
+				XMStoreFloat3(&vertices[indices2].normal, normal);
 
 			}
-			else {
-				fence->SetEventOnCompletion(fenceVal, event);
-				WaitForSingleObject(event, INFINITE);
-				CloseHandle(event);
+
+			// 全頂点に対して
+			for (int i = 0; i < _countof(vertices); i++) {
+				vertMap[i] = vertices[i]; // 座標をコピー
 			}
+
+
+
+			//カメラ
+			if (key[DIK_D] || key[DIK_A]) {
+				if (key[DIK_D]) {
+					angle += XMConvertToRadians(1.0f);
+				}
+				else if (key[DIK_A]) {
+					angle -= XMConvertToRadians(1.0f);
+				}
+				//angleラジアンだけY軸周りに回転。半径は-100
+				eye.x = -100 * sinf(angle);
+				eye.z = -100 * cosf(angle);
+
+				//ビュー変換行列
+				matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+			}
+
+			for (size_t i = 0; i < _countof(object3ds); i++)
+			{
+				UpdateObject3d(&object3ds[i], matView, matProjection);
+			}
+
+			for (size_t i = 0; i < _countof(block3ds); i++)
+			{
+				UpdateObject3d(&block3ds[i], matView, matProjection);
+			}
+
+			if (key[DIK_SPACE]) {
+				scene = Scene::GameScene;
+			}
+
+
+			// 4.描画コマンドここから
+
+			// ビューポート設定コマンド
+			D3D12_VIEWPORT viewport{};
+			viewport.Width = window_width;
+			viewport.Height = window_height;
+			viewport.TopLeftX = 0;
+			viewport.TopLeftY = 0;
+			viewport.MinDepth = 0.0f;
+			viewport.MaxDepth = 1.0f;
+			// ビューポート設定コマンドを、コマンドリストに積む
+			commandList->RSSetViewports(1, &viewport);
+
+			// シザー矩形
+			D3D12_RECT scissorRect{};
+			scissorRect.left = 0;                                       // 切り抜き座標左
+			scissorRect.right = window_width;        // 切り抜き座標右
+			scissorRect.top = 0;                                        // 切り抜き座標上
+			scissorRect.bottom = window_height;		// 切り抜き座標下
+
+
+
+			// シザー矩形設定コマンドを、コマンドリストに積む
+			commandList->RSSetScissorRects(1, &scissorRect);
+
+			// パイプラインステートとルートシグネチャの設定コマンド
+			commandList->SetPipelineState(pipelineState.Get());
+			commandList->SetGraphicsRootSignature(rootSignature.Get());
+
+			// プリミティブ形状の設定コマンド
+			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
+
+			// 頂点バッファビューの設定コマンド
+			commandList->IASetVertexBuffers(0, 1, &vbView);
+
+			// 定数バッファビュー(CBV)の設定コマンド
+			commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
+
+			ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
+			// SRVヒープの設定コマンド
+			commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+			// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
+			D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+
+			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+
+			// インデックスバッファビューの設定コマンド
+			commandList->IASetIndexBuffer(&ibView);
+
+
+			//全オブジェクトについて処理
+			for (int i = 0; i < _countof(object3ds); i++) {
+				DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
+			}
+
+			//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
+			srvGpuHandle.ptr += incrementSize;
+			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+			//障害物
+			for (int i = 0; i < _countof(block3ds); i++) {
+				DrawObject3d(&block3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
+			}
+
+			// 4.描画コマンドここまで
+
+			// 5.リソースバリアを戻す
+			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
+			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
+			commandList->ResourceBarrier(1, &barrierDesc);
+
+			// 命令のクローズ
+			result = commandList->Close();
+			assert(SUCCEEDED(result));
+			// コマンドリストの実行
+			ID3D12CommandList* commandLists[] = { commandList.Get() };
+			commandQueue->ExecuteCommandLists(1, commandLists);
+			// 画面に表示するバッファをフリップ(裏表の入替え)
+			result = swapChain->Present(1, 0);
+			assert(SUCCEEDED(result));
+
+			// コマンドの実行完了を待つ
+			commandQueue->Signal(fence.Get(), ++fenceVal);
+			if (fence->GetCompletedValue() != fenceVal) {
+				HANDLE event = CreateEvent(nullptr, false, false, nullptr);
+				if (event == NULL) {
+
+				}
+				else {
+					fence->SetEventOnCompletion(fenceVal, event);
+					WaitForSingleObject(event, INFINITE);
+					CloseHandle(event);
+				}
+			}
+			// キューをクリア
+			result = cmdAllocator->Reset();
+			assert(SUCCEEDED(result));
+			// 再びコマンドリストを貯める準備
+			result = commandList->Reset(cmdAllocator.Get(), nullptr);
+			assert(SUCCEEDED(result));
 		}
-		// キューをクリア
-		result = cmdAllocator->Reset();
-		assert(SUCCEEDED(result));
-		// 再びコマンドリストを貯める準備
-		result = commandList->Reset(cmdAllocator.Get(), nullptr);
-		assert(SUCCEEDED(result));
-		//DirectX毎フレーム処理 ここまで
+		else if (scene==Scene::GameScene) {
+
+			// キーボード情報の取得開始
+			keyboard->Acquire();
+
+			// 全キーの入力状態を取得する
+			BYTE key[256] = {};
+			keyboard->GetDeviceState(sizeof(key), key);
+
+
+
+			// バックバッファの番号を取得(2つなので0番か1番)
+			UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
+			// 1.リソースバリアで書き込み可能に変更
+			D3D12_RESOURCE_BARRIER barrierDesc{};
+			barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
+			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
+			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
+			commandList->ResourceBarrier(1, &barrierDesc);
+
+			// 2.描画先の変更
+			// レンダーターゲットビューのハンドルを取得
+			D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+			rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
+			//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
+			D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+			commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
+
+
+
+
+			// 3.画面クリア R G B A
+			FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
+
+			////スペースキーが押されたら
+			//if (key[DIK_SPACE]) {
+			//	clearColor[0] = { 0.7f };
+			//}
+
+
+			commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+			commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+			for (int i = 0; i < _countof(indices) / 3; i++)
+			{
+				//三角形1つごとに計算していく
+				//三角形のインデックスを取り出して、一時的な変数に入れる
+				unsigned short indices0 = indices[i * 3 + 0];
+				unsigned short indices1 = indices[i * 3 + 1];
+				unsigned short indices2 = indices[i * 3 + 2];
+				//三角形を構成する頂点座標をベクトルに代入
+				XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
+				XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
+				XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
+				//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
+				XMVECTOR v1 = XMVectorSubtract(p1, p0);
+				XMVECTOR v2 = XMVectorSubtract(p2, p0);
+				//外積は両方から垂直なベクトル
+				XMVECTOR normal = XMVector3Cross(v1, v2);
+				//正規化(長さを1にする)
+				normal = XMVector3Normalize(normal);
+				//求めた法線を頂点データに代入
+				XMStoreFloat3(&vertices[indices0].normal, normal);
+				XMStoreFloat3(&vertices[indices1].normal, normal);
+				XMStoreFloat3(&vertices[indices2].normal, normal);
+
+			}
+
+			// 全頂点に対して
+			for (int i = 0; i < _countof(vertices); i++) {
+				vertMap[i] = vertices[i]; // 座標をコピー
+			}
+
+
+
+			//カメラ
+			if (key[DIK_D] || key[DIK_A]) {
+				if (key[DIK_D]) {
+					angle += XMConvertToRadians(1.0f);
+				}
+				else if (key[DIK_A]) {
+					angle -= XMConvertToRadians(1.0f);
+				}
+				//angleラジアンだけY軸周りに回転。半径は-100
+				eye.x = -100 * sinf(angle);
+				eye.z = -100 * cosf(angle);
+
+				//ビュー変換行列
+				matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+			}
+
+
+
+			//自機の座標操作
+
+			isUp = 0;
+
+			if (key[DIK_UP] || key[DIK_DOWN] || key[DIK_RIGHT] || key[DIK_LEFT] || key[DIK_SPACE])
+			{
+				if (key[DIK_UP]) { object3ds[0].position.z += 1.0f; }
+				else if (key[DIK_DOWN]) { object3ds[0].position.z -= 1.0f; }
+				if (key[DIK_RIGHT]) { object3ds[0].position.x += 1.0f; }
+				else if (key[DIK_LEFT]) { object3ds[0].position.x -= 1.0f; }
+				if (key[DIK_SPACE]) { isUp = 1; }
+			}
+			if (isUp == 0) {
+				object3ds[0].position.y += gravity;
+			}
+			else if (isUp == 1) {
+				object3ds[0].position.y -= gravity;
+			}
+
+			for (size_t i = 0; i < _countof(object3ds); i++)
+			{
+				UpdateObject3d(&object3ds[i], matView, matProjection);
+			}
+
+			for (size_t i = 0; i < _countof(block3ds); i++)
+			{
+				UpdateObject3d(&block3ds[i], matView, matProjection);
+			}
+
+
+			// 4.描画コマンドここから
+
+			// ビューポート設定コマンド
+			D3D12_VIEWPORT viewport{};
+			viewport.Width = window_width;
+			viewport.Height = window_height;
+			viewport.TopLeftX = 0;
+			viewport.TopLeftY = 0;
+			viewport.MinDepth = 0.0f;
+			viewport.MaxDepth = 1.0f;
+			// ビューポート設定コマンドを、コマンドリストに積む
+			commandList->RSSetViewports(1, &viewport);
+
+			// シザー矩形
+			D3D12_RECT scissorRect{};
+			scissorRect.left = 0;                                       // 切り抜き座標左
+			scissorRect.right = window_width;        // 切り抜き座標右
+			scissorRect.top = 0;                                        // 切り抜き座標上
+			scissorRect.bottom = window_height;		// 切り抜き座標下
+
+
+
+			// シザー矩形設定コマンドを、コマンドリストに積む
+			commandList->RSSetScissorRects(1, &scissorRect);
+
+			// パイプラインステートとルートシグネチャの設定コマンド
+			commandList->SetPipelineState(pipelineState.Get());
+			commandList->SetGraphicsRootSignature(rootSignature.Get());
+
+			// プリミティブ形状の設定コマンド
+			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
+
+			// 頂点バッファビューの設定コマンド
+			commandList->IASetVertexBuffers(0, 1, &vbView);
+
+			// 定数バッファビュー(CBV)の設定コマンド
+			commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
+
+			ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
+			// SRVヒープの設定コマンド
+			commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+			// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
+			D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+
+			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+
+			// インデックスバッファビューの設定コマンド
+			commandList->IASetIndexBuffer(&ibView);
+
+
+			//全オブジェクトについて処理
+			for (int i = 0; i < _countof(object3ds); i++) {
+				DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
+			}
+
+			//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
+			srvGpuHandle.ptr += incrementSize;
+			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+			//障害物
+			for (int i = 0; i < _countof(block3ds); i++) {
+				DrawObject3d(&block3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
+			}
+
+			// 4.描画コマンドここまで
+
+			// 5.リソースバリアを戻す
+			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
+			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
+			commandList->ResourceBarrier(1, &barrierDesc);
+
+			// 命令のクローズ
+			result = commandList->Close();
+			assert(SUCCEEDED(result));
+			// コマンドリストの実行
+			ID3D12CommandList* commandLists[] = { commandList.Get() };
+			commandQueue->ExecuteCommandLists(1, commandLists);
+			// 画面に表示するバッファをフリップ(裏表の入替え)
+			result = swapChain->Present(1, 0);
+			assert(SUCCEEDED(result));
+
+			// コマンドの実行完了を待つ
+			commandQueue->Signal(fence.Get(), ++fenceVal);
+			if (fence->GetCompletedValue() != fenceVal) {
+				HANDLE event = CreateEvent(nullptr, false, false, nullptr);
+				if (event == NULL) {
+
+				}
+				else {
+					fence->SetEventOnCompletion(fenceVal, event);
+					WaitForSingleObject(event, INFINITE);
+					CloseHandle(event);
+				}
+			}
+			// キューをクリア
+			result = cmdAllocator->Reset();
+			assert(SUCCEEDED(result));
+			// 再びコマンドリストを貯める準備
+			result = commandList->Reset(cmdAllocator.Get(), nullptr);
+			assert(SUCCEEDED(result));
+
+			//DirectX毎フレーム処理 ここまで
+		}
 	}
 	//ウィンドウクラスを登録解除
 	UnregisterClass(w.lpszClassName, w.hInstance);
