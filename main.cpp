@@ -2,12 +2,13 @@
 #include <DirectXTex.h>
 #include <Windows.h>
 #include <d3d12.h>
+#include<d3dx12.h>
 #include <dxgi1_6.h>
 #include <cassert>
 #include <vector>
 #include <string>
 #include <DirectXMath.h>
-#include<math.h>
+#include <math.h>
 
 #include <wrl.h>
 using namespace Microsoft::WRL;
@@ -24,12 +25,8 @@ using namespace DirectX;
 
 const float PI = 3.141592f;
 
-enum Scene {
-	Title,
-	GameScene,
-	GameClear,
-	GmaeOver
-};
+const int window_width = 1200; //横幅
+const int window_height = 720; //縦幅
 
 //定数バッファ用データ構造体(マテリアル)
 struct ConstBufferDataMaterial {
@@ -39,6 +36,37 @@ struct ConstBufferDataMaterial {
 //定数バッファ用データ構造体(3D変換行列)
 struct ConstBufferDataTransform {
 	XMMATRIX mat;		//3D変換行列
+};
+
+//定数バッファ用データ構造体
+struct ConstBufferData {
+	XMFLOAT4 color;		//色(RGBA)
+	XMMATRIX mat;		//3D変換行列
+};
+
+//頂点データ
+struct VertexPosUv
+{
+	XMFLOAT3 pos;	//xyz座標
+	XMFLOAT2 uv;	//uv座標
+};
+
+//パイプラインセット
+struct PipelineSet
+{
+	//パイプラインステートオブジェクト
+	ComPtr<ID3D12PipelineState>pipelinestate;
+	//ルートシグネチャ
+	ComPtr<ID3D12RootSignature>rootsignature;
+};
+
+//スプライト1枚分のデータ
+struct Sprite
+{
+	ComPtr<ID3D12Resource> vertBuff;				//頂点バッファ
+	D3D12_VERTEX_BUFFER_VIEW vbView{};				//頂点バッファビュー
+	ComPtr<ID3D12Resource> constBuffTransform;		//定数バッファビュー
+
 };
 
 //3Dオブジェクト型
@@ -57,6 +85,307 @@ struct Object3d
 	//親オブジェクトへのポインタ
 	Object3d* parent = nullptr;
 };
+
+
+//パイプライン生成
+PipelineSet Pipeline3D(ID3D12Device* dev)
+{
+	HRESULT result;
+
+	ID3DBlob* vsBlob = nullptr; // オブジェクト頂点シェーダ
+	ID3DBlob* psBlob = nullptr; // ピクセルシェーダオブジェクト
+	ID3DBlob* errorBlob = nullptr; // エラーオブジェクト
+
+	// 頂点シェーダの読み込みとコンパイル
+	result = D3DCompileFromFile(
+		L"Resources/shaders/BasicVS.hlsl",  // シェーダファイル名
+		nullptr,
+		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
+		"main", "vs_5_0", // エントリーポイント名、シェーダーモデル指定
+		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
+		0,
+		&vsBlob, &errorBlob);
+
+	// エラーなら
+	if (FAILED(result)) {
+		// errorBlobからエラー内容をstring型にコピー
+		std::string error;
+		error.resize(errorBlob->GetBufferSize());
+
+		std::copy_n((char*)errorBlob->GetBufferPointer(),
+			errorBlob->GetBufferSize(),
+			error.begin());
+		error += "\n";
+		// エラー内容を出力ウィンドウに表示
+		OutputDebugStringA(error.c_str());
+		assert(0);
+	}
+
+
+
+	// ピクセルシェーダの読み込みとコンパイル
+	result = D3DCompileFromFile(
+		L"Resources/shaders/BasicPS.hlsl",   // シェーダファイル名
+		nullptr,
+		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
+		"main", "ps_5_0", // エントリーポイント名、シェーダーモデル指定
+		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
+		0,
+		&psBlob, &errorBlob);
+
+	// エラーなら
+	if (FAILED(result)) {
+		// errorBlobからエラー内容をstring型にコピー
+		std::string error;
+		error.resize(errorBlob->GetBufferSize());
+
+		std::copy_n((char*)errorBlob->GetBufferPointer(),
+			errorBlob->GetBufferSize(),
+			error.begin());
+		error += "\n";
+		// エラー内容を出力ウィンドウに表示
+		OutputDebugStringA(error.c_str());
+		assert(0);
+	}
+
+
+	// 頂点レイアウト
+	D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+		{ // xyz座標(1行で書いたほうが見やすい)
+			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+		},
+
+		{//法線ベクトル(1行ｓｗ書いたほうが見やすい)
+			"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0
+		},
+
+		{ // uv座標(1行で書いたほうが見やすい)
+			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+		},
+	};
+
+	// グラフィックスパイプライン設定
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc{};
+
+	// シェーダーの設定
+	pipelineDesc.VS.pShaderBytecode = vsBlob->GetBufferPointer();
+	pipelineDesc.VS.BytecodeLength = vsBlob->GetBufferSize();
+	pipelineDesc.PS.pShaderBytecode = psBlob->GetBufferPointer();
+	pipelineDesc.PS.BytecodeLength = psBlob->GetBufferSize();
+
+	// サンプルマスクの設定
+	pipelineDesc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK; // 標準設定
+
+	// ラスタライザの設定
+	pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;  // カリングしない
+	pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗りつぶし
+	pipelineDesc.RasterizerState.DepthClipEnable = true; // 深度クリッピングを有効に
+
+	// ブレンドステート
+	//pipelineDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;  // RBGA全てのチャンネルを描画
+	D3D12_RENDER_TARGET_BLEND_DESC& blenddesc = pipelineDesc.BlendState.RenderTarget[0];
+	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	blenddesc.BlendEnable = true;
+	blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+	blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+
+	////加算合成
+	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;			//加算
+	//blenddesc.SrcBlend = D3D12_BLEND_ONE;			//ソースの値を100%使う
+	//blenddesc.DestBlend = D3D12_BLEND_ONE;			//デストの値を100%使う
+
+	////減算合成
+	//blenddesc.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;	//デストからソースを減算
+	//blenddesc.SrcBlend = D3D12_BLEND_ONE;				//ソースの値を100%使う
+	//blenddesc.DestBlend = D3D12_BLEND_ONE;				//デストの値を100%使う
+	//
+	////色反転
+	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
+	//blenddesc.SrcBlend = D3D12_BLEND_INV_DEST_COLOR;	//1.0f-デストカラーの値
+	//blenddesc.DestBlend = D3D12_BLEND_ZERO;				//使わない
+
+	//半透明合成
+	blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
+	blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;			//ソースのアルファ値
+	blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;	//1.0f-ソースのアルファ値
+
+
+	// 頂点レイアウトの設定
+	pipelineDesc.InputLayout.pInputElementDescs = inputLayout;
+	pipelineDesc.InputLayout.NumElements = _countof(inputLayout);
+
+	// 図形の形状設定
+	pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+	// その他の設定
+	pipelineDesc.NumRenderTargets = 1; // 描画対象は1つ
+	pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 0～255指定のRGBA
+	pipelineDesc.SampleDesc.Count = 1; // 1ピクセルにつき1回サンプリング
+
+	// デスクリプタレンジの設定
+	D3D12_DESCRIPTOR_RANGE descriptorRange{};
+	descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
+	descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
+	descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	// テクスチャサンプラーの設定
+	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
+	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
+	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
+	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
+	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
+	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
+	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
+	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
+	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
+
+	// ルートパラメータの設定
+	D3D12_ROOT_PARAMETER rootParams[3] = {};
+	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
+	rootParams[0].Descriptor.ShaderRegister = 0;                    // 定数バッファ番号
+	rootParams[0].Descriptor.RegisterSpace = 0;                     // デフォルト値
+	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
+	// テクスチャレジスタ0番
+	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
+	rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
+	rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
+	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
+	//定数バッファ1番
+	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
+	rootParams[2].Descriptor.ShaderRegister = 1;                    // 定数バッファ番号
+	rootParams[2].Descriptor.RegisterSpace = 0;                     // デフォルト値
+	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
+
+
+
+	// ルートシグネチャ
+	ComPtr<ID3D12RootSignature> rootSignature;
+	// ルートシグネチャの設定
+	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
+	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+	rootSignatureDesc.pParameters = rootParams; //ルートパラメータの先頭アドレス
+	rootSignatureDesc.NumParameters = _countof(rootParams);        //ルートパラメータ数
+	rootSignatureDesc.pStaticSamplers = &samplerDesc;
+	rootSignatureDesc.NumStaticSamplers = 1;
+
+
+
+	//パイプラインとルートシグネチャのセット
+	PipelineSet pipelineSet;
+
+	// ルートシグネチャのシリアライズ
+	ComPtr<ID3DBlob> rootSigBlob = nullptr;
+	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
+	assert(SUCCEEDED(result));
+
+	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&pipelineSet.rootsignature));
+	assert(SUCCEEDED(result));
+
+
+	// パイプラインにルートシグネチャをセット
+	pipelineDesc.pRootSignature = pipelineSet.rootsignature.Get();
+
+	//デスステンシルステートの設定
+	pipelineDesc.DepthStencilState.DepthEnable = true;//深度テストを行う
+	pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//書き込み許可
+	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;//小さければ合格
+	pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;//深度値フォーマット
+
+	// パイプラインステートの生成
+	ComPtr<ID3D12PipelineState> pipelineState = nullptr;
+	result = dev->CreateGraphicsPipelineState(&pipelineDesc, IID_PPV_ARGS(&pipelineSet.pipelinestate));
+	assert(SUCCEEDED(result));
+
+	//パイプラインとルートシグネチャを返す
+	return pipelineSet;
+}
+
+//スプライト生成
+Sprite SpriteCreate(ID3D12Device* dev, int windou_width,int window_height)
+{
+	HRESULT result = S_FALSE;
+
+	//新しいスプライトを作る
+	Sprite sprite{};
+
+	//頂点データ
+	VertexPosUv vertices[] = {
+		//	x	y	z			u	v
+		{{  0.0f,100.0f,0.0f},{0.0f,1.0f}},		//左下
+		{{  0.0f,  0.0f,0.0f},{0.0f,0.0f}},		//左上
+		{{100.0f,100.0f,0.0f},{1.0f,1.0f}},		//右下
+		{{100.0f,  0.0f,0.0f},{1.0f,0.0f}},		//右上	
+	};
+
+	// 頂点バッファの生成
+	result = dev->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD), // ヒープ設定
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(sizeof(vertices)),
+		D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&sprite.vertBuff));
+
+	//頂点バッファへのデータ転送
+	VertexPosUv* vertMap = nullptr;
+	result = sprite.vertBuff->Map(0, nullptr, (void**)&vertMap);
+	memcpy(vertMap, vertices, sizeof(vertices));
+	sprite.vertBuff->Unmap(0, nullptr);
+
+	//頂点バッファビューの作成
+	sprite.vbView.BufferLocation = sprite.vertBuff->GetGPUVirtualAddress();
+	sprite.vbView.SizeInBytes = sizeof(vertices);
+	sprite.vbView.StrideInBytes = sizeof(vertices[0]);
+
+
+	//定数バッファの作成
+	result = dev->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer((sizeof(ConstBufferData) + 0xff) & ~0xff),
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+		IID_PPV_ARGS(&sprite.constBuffTransform));
+
+	//定数バッファにデータ転送
+	ConstBufferData* constMap = nullptr;
+	result = sprite.constBuffTransform->Map(0, nullptr, (void**)&constMap);
+	constMap->color = XMFLOAT4(1, 1, 1, 1);	//色指定(RGBA)
+	//平行投影行列
+	constMap->mat = XMMatrixOrthographicOffCenterLH(
+		0.0f, window_width, window_height, 0.0f, 0.0f, 1.0f);
+	sprite.constBuffTransform->Unmap(0, nullptr);
+}
+
+
+//スプライト共通グラフィックコマンドのセット
+void SpriteCommonBeginDraw(ID3D12GraphicsCommandList* cmdList,const PipelineSet& pipelineSet,ID3D12DescriptorHeap*descHeap)
+{
+	//パイプラインステートの設定
+	cmdList->SetPipelineState(pipelineSet.pipelinestate.Get());
+	//ルートシグネチャの設定
+	cmdList->SetGraphicsRootSignature(pipelineSet.rootsignature.Get());
+	//プリミティブ形状を設定
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+	//テクスチャ用デスクリプタヒープの設定
+	ID3D12DescriptorHeap* ppHeaps[] = { descHeap };
+	cmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+}
+
+//スプライト単体描画
+void SpriteDraw(const Sprite& sprite,ID3D12GraphicsCommandList*cmdList)
+{
+	//頂点バッファをセット
+	cmdList->IASetVertexBuffers(0, 1, &sprite.vbView);
+
+	//定数バッファをセット
+	cmdList->SetGraphicsRootConstantBufferView(0, sprite.constBuffTransform->GetGPUVirtualAddress());
+
+	//ポリゴンの描画(4頂点で四角形)
+	cmdList->DrawInstanced(4, 1, 0, 0);
+
+}
 
 
 //3Dオブジェクトの初期化
@@ -138,6 +467,22 @@ void DrawObject3d(Object3d* object, ID3D12GraphicsCommandList* commandList, D3D1
 	commandList->DrawIndexedInstanced(numIndices, 1, 0, 0, 0);
 }
 
+bool CheakCollision(XMFLOAT3 posA, XMFLOAT3 posB, XMFLOAT3 sclA, XMFLOAT3 sclB) {
+
+	float a = 5.0f;
+	sclA = { sclA.x * a,sclA.y * a ,sclA.z * a };
+	sclB = { sclB.x * a,sclB.y * a ,sclB.z * a };
+
+	if (posA.x - sclA.x < posB.x + sclB.x && posA.x + sclA.x > posB.x - sclB.x &&
+		posA.y - sclA.y < posB.y + sclB.y && posA.y + sclA.y > posB.y - sclB.y &&
+		posA.z - sclA.z < posB.z + sclB.z && posA.z + sclA.z > posB.z - sclB.z)
+	{
+		return true;
+	}
+
+	return false;
+}
+
 //ウィンドウプロージャ
 LRESULT WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	//メッセージに応じてゲーム固有の処理を行う
@@ -154,9 +499,8 @@ LRESULT WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
 //Windowsアプリでのエントリーポイント(main関数)
 int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
-	const int window_width = 1200; //横幅
-	const int window_height = 720; //縦幅
 
+	
 
 
 	//ウィンドウクラスの設定
@@ -410,18 +754,34 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	assert(SUCCEEDED(result));
 
 
+
+
 	//DirectX初期化処理 ここまで
 
 
 
 	//描画初期化処理 ここから
 	// 
-	Scene scene = Scene::Title;
+	//初期化
+	
+	//スプライト
+	Sprite sprite;
+
+	//スプライトの生成
+	sprite = SpriteCreate(device.Get(), window_width, window_height);
+
+
+	//キャラクターの移動ベクトル
+	XMFLOAT3 move = { 0, 0, 0 };
+	const float gravity = -2.0f;
 
 	//重力
-	float gravity = -1.0f;
 	int isUp = 0;
+	float upSpeed = 0.0f;
 
+	float downSpeed = 0.0f;
+
+	bool isDead = 0;
 	//スケーリング倍率
 	XMFLOAT3 scale;
 	//回転角
@@ -552,207 +912,207 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	// 頂点データ1つ分のサイズ
 	vbView.StrideInBytes = sizeof(vertices[0]);
 
-	ID3DBlob* vsBlob = nullptr; // 頂点シェーダオブジェクト
-	ID3DBlob* psBlob = nullptr; // ピクセルシェーダオブジェクト
-	ID3DBlob* errorBlob = nullptr; // エラーオブジェクト
+	//ID3DBlob* vsBlob = nullptr; // オブジェクト頂点シェーダ
+	//ID3DBlob* psBlob = nullptr; // ピクセルシェーダオブジェクト
+	//ID3DBlob* errorBlob = nullptr; // エラーオブジェクト
 
-	// 頂点シェーダの読み込みとコンパイル
-	result = D3DCompileFromFile(
-		L"Resources/shaders/BasicVS.hlsl",  // シェーダファイル名
-		nullptr,
-		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
-		"main", "vs_5_0", // エントリーポイント名、シェーダーモデル指定
-		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
-		0,
-		&vsBlob, &errorBlob);
+	//// 頂点シェーダの読み込みとコンパイル
+	//result = D3DCompileFromFile(
+	//	L"Resources/shaders/BasicVS.hlsl",  // シェーダファイル名
+	//	nullptr,
+	//	D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
+	//	"main", "vs_5_0", // エントリーポイント名、シェーダーモデル指定
+	//	D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
+	//	0,
+	//	&vsBlob, &errorBlob);
 
-	// エラーなら
-	if (FAILED(result)) {
-		// errorBlobからエラー内容をstring型にコピー
-		std::string error;
-		error.resize(errorBlob->GetBufferSize());
+	//// エラーなら
+	//if (FAILED(result)) {
+	//	// errorBlobからエラー内容をstring型にコピー
+	//	std::string error;
+	//	error.resize(errorBlob->GetBufferSize());
 
-		std::copy_n((char*)errorBlob->GetBufferPointer(),
-			errorBlob->GetBufferSize(),
-			error.begin());
-		error += "\n";
-		// エラー内容を出力ウィンドウに表示
-		OutputDebugStringA(error.c_str());
-		assert(0);
-	}
+	//	std::copy_n((char*)errorBlob->GetBufferPointer(),
+	//		errorBlob->GetBufferSize(),
+	//		error.begin());
+	//	error += "\n";
+	//	// エラー内容を出力ウィンドウに表示
+	//	OutputDebugStringA(error.c_str());
+	//	assert(0);
+	//}
 
-	// ピクセルシェーダの読み込みとコンパイル
-	result = D3DCompileFromFile(
-		L"Resources/shaders/BasicPS.hlsl",   // シェーダファイル名
-		nullptr,
-		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
-		"main", "ps_5_0", // エントリーポイント名、シェーダーモデル指定
-		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
-		0,
-		&psBlob, &errorBlob);
+	//// ピクセルシェーダの読み込みとコンパイル
+	//result = D3DCompileFromFile(
+	//	L"Resources/shaders/BasicPS.hlsl",   // シェーダファイル名
+	//	nullptr,
+	//	D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
+	//	"main", "ps_5_0", // エントリーポイント名、シェーダーモデル指定
+	//	D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, // デバッグ用設定
+	//	0,
+	//	&psBlob, &errorBlob);
 
-	// エラーなら
-	if (FAILED(result)) {
-		// errorBlobからエラー内容をstring型にコピー
-		std::string error;
-		error.resize(errorBlob->GetBufferSize());
+	//// エラーなら
+	//if (FAILED(result)) {
+	//	// errorBlobからエラー内容をstring型にコピー
+	//	std::string error;
+	//	error.resize(errorBlob->GetBufferSize());
 
-		std::copy_n((char*)errorBlob->GetBufferPointer(),
-			errorBlob->GetBufferSize(),
-			error.begin());
-		error += "\n";
-		// エラー内容を出力ウィンドウに表示
-		OutputDebugStringA(error.c_str());
-		assert(0);
-	}
+	//	std::copy_n((char*)errorBlob->GetBufferPointer(),
+	//		errorBlob->GetBufferSize(),
+	//		error.begin());
+	//	error += "\n";
+	//	// エラー内容を出力ウィンドウに表示
+	//	OutputDebugStringA(error.c_str());
+	//	assert(0);
+	//}
 
-	// 頂点レイアウト
-	D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
-		{ // xyz座標(1行で書いたほうが見やすい)
-			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
-		},
+	//// 頂点レイアウト
+	//D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+	//	{ // xyz座標(1行で書いたほうが見やすい)
+	//		"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+	//	},
 
-		{//法線ベクトル(1行ｓｗ書いたほうが見やすい)
-			"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0
-		},
+	//	{//法線ベクトル(1行ｓｗ書いたほうが見やすい)
+	//		"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0
+	//	},
 
-		{ // uv座標(1行で書いたほうが見やすい)
-			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
-		},
-	};
+	//	{ // uv座標(1行で書いたほうが見やすい)
+	//		"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+	//	},
+	//};
 
 
-	// グラフィックスパイプライン設定
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc{};
+	//// グラフィックスパイプライン設定
+	//D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc{};
 
-	// シェーダーの設定
-	pipelineDesc.VS.pShaderBytecode = vsBlob->GetBufferPointer();
-	pipelineDesc.VS.BytecodeLength = vsBlob->GetBufferSize();
-	pipelineDesc.PS.pShaderBytecode = psBlob->GetBufferPointer();
-	pipelineDesc.PS.BytecodeLength = psBlob->GetBufferSize();
+	//// シェーダーの設定
+	//pipelineDesc.VS.pShaderBytecode = vsBlob->GetBufferPointer();
+	//pipelineDesc.VS.BytecodeLength = vsBlob->GetBufferSize();
+	//pipelineDesc.PS.pShaderBytecode = psBlob->GetBufferPointer();
+	//pipelineDesc.PS.BytecodeLength = psBlob->GetBufferSize();
 
-	// サンプルマスクの設定
-	pipelineDesc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK; // 標準設定
+	//// サンプルマスクの設定
+	//pipelineDesc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK; // 標準設定
 
-	// ラスタライザの設定
-	pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;  // カリングしない
-	pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗りつぶし
-	pipelineDesc.RasterizerState.DepthClipEnable = true; // 深度クリッピングを有効に
+	//// ラスタライザの設定
+	//pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;  // カリングしない
+	//pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗りつぶし
+	//pipelineDesc.RasterizerState.DepthClipEnable = true; // 深度クリッピングを有効に
 
-	// ブレンドステート
-	//pipelineDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;  // RBGA全てのチャンネルを描画
-	D3D12_RENDER_TARGET_BLEND_DESC& blenddesc = pipelineDesc.BlendState.RenderTarget[0];
-	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-	blenddesc.BlendEnable = true;
-	blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-	blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-	blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	//// ブレンドステート
+	////pipelineDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;  // RBGA全てのチャンネルを描画
+	//D3D12_RENDER_TARGET_BLEND_DESC& blenddesc = pipelineDesc.BlendState.RenderTarget[0];
+	//blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	//blenddesc.BlendEnable = true;
+	//blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	//blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+	//blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;
 
-	////加算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;			//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;			//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;			//デストの値を100%使う
+	//////加算合成
+	////blenddesc.BlendOp = D3D12_BLEND_OP_ADD;			//加算
+	////blenddesc.SrcBlend = D3D12_BLEND_ONE;			//ソースの値を100%使う
+	////blenddesc.DestBlend = D3D12_BLEND_ONE;			//デストの値を100%使う
 
-	////減算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;	//デストからソースを減算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;				//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;				//デストの値を100%使う
-	//
-	////色反転
+	//////減算合成
+	////blenddesc.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;	//デストからソースを減算
+	////blenddesc.SrcBlend = D3D12_BLEND_ONE;				//ソースの値を100%使う
+	////blenddesc.DestBlend = D3D12_BLEND_ONE;				//デストの値を100%使う
+	////
+	//////色反転
+	////blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
+	////blenddesc.SrcBlend = D3D12_BLEND_INV_DEST_COLOR;	//1.0f-デストカラーの値
+	////blenddesc.DestBlend = D3D12_BLEND_ZERO;				//使わない
+
+	////半透明合成
 	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_INV_DEST_COLOR;	//1.0f-デストカラーの値
-	//blenddesc.DestBlend = D3D12_BLEND_ZERO;				//使わない
-
-	//半透明合成
-	blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;			//ソースのアルファ値
-	blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;	//1.0f-ソースのアルファ値
+	//blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;			//ソースのアルファ値
+	//blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;	//1.0f-ソースのアルファ値
 
 
-	// 頂点レイアウトの設定
-	pipelineDesc.InputLayout.pInputElementDescs = inputLayout;
-	pipelineDesc.InputLayout.NumElements = _countof(inputLayout);
+	//// 頂点レイアウトの設定
+	//pipelineDesc.InputLayout.pInputElementDescs = inputLayout;
+	//pipelineDesc.InputLayout.NumElements = _countof(inputLayout);
 
-	// 図形の形状設定
-	pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	//// 図形の形状設定
+	//pipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
-	// その他の設定
-	pipelineDesc.NumRenderTargets = 1; // 描画対象は1つ
-	pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 0～255指定のRGBA
-	pipelineDesc.SampleDesc.Count = 1; // 1ピクセルにつき1回サンプリング
+	//// その他の設定
+	//pipelineDesc.NumRenderTargets = 1; // 描画対象は1つ
+	//pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 0～255指定のRGBA
+	//pipelineDesc.SampleDesc.Count = 1; // 1ピクセルにつき1回サンプリング
 
-	// デスクリプタレンジの設定
-	D3D12_DESCRIPTOR_RANGE descriptorRange{};
-	descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
-	descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
-	descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+	//// デスクリプタレンジの設定
+	//D3D12_DESCRIPTOR_RANGE descriptorRange{};
+	//descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
+	//descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	//descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
+	//descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-	// テクスチャサンプラーの設定
-	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
-	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
-	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
-	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
-	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
-	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
-	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
-	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
-	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
+	//// テクスチャサンプラーの設定
+	//D3D12_STATIC_SAMPLER_DESC samplerDesc{};
+	//samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
+	//samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
+	//samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
+	//samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
+	//samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
+	//samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
+	//samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
+	//samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	//samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
 
-	// ルートパラメータの設定
-	D3D12_ROOT_PARAMETER rootParams[3] = {};
-	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[0].Descriptor.ShaderRegister = 0;                    // 定数バッファ番号
-	rootParams[0].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-	// テクスチャレジスタ0番
-	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
-	rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
-	rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
-	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
-	//定数バッファ1番
-	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[2].Descriptor.ShaderRegister = 1;                    // 定数バッファ番号
-	rootParams[2].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-	// ルートシグネチャ
-	ComPtr<ID3D12RootSignature> rootSignature;
-	// ルートシグネチャの設定
-	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
-	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-	rootSignatureDesc.pParameters = rootParams; //ルートパラメータの先頭アドレス
-	rootSignatureDesc.NumParameters = _countof(rootParams);        //ルートパラメータ数
-	rootSignatureDesc.pStaticSamplers = &samplerDesc;
-	rootSignatureDesc.NumStaticSamplers = 1;
+	//// ルートパラメータの設定
+	//D3D12_ROOT_PARAMETER rootParams[3] = {};
+	//rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
+	//rootParams[0].Descriptor.ShaderRegister = 0;                    // 定数バッファ番号
+	//rootParams[0].Descriptor.RegisterSpace = 0;                     // デフォルト値
+	//rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
+	//// テクスチャレジスタ0番
+	//rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
+	//rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
+	//rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
+	//rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
+	////定数バッファ1番
+	//rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
+	//rootParams[2].Descriptor.ShaderRegister = 1;                    // 定数バッファ番号
+	//rootParams[2].Descriptor.RegisterSpace = 0;                     // デフォルト値
+	//rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
+	//// ルートシグネチャ
+	//ComPtr<ID3D12RootSignature> rootSignature;
+	//// ルートシグネチャの設定
+	//D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
+	//rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+	//rootSignatureDesc.pParameters = rootParams; //ルートパラメータの先頭アドレス
+	//rootSignatureDesc.NumParameters = _countof(rootParams);        //ルートパラメータ数
+	//rootSignatureDesc.pStaticSamplers = &samplerDesc;
+	//rootSignatureDesc.NumStaticSamplers = 1;
 
 
 
 
-	// ルートシグネチャのシリアライズ
-	ComPtr<ID3DBlob> rootSigBlob = nullptr;
-	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
-	assert(SUCCEEDED(result));
-	result = device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
-	assert(SUCCEEDED(result));
+	//// ルートシグネチャのシリアライズ
+	//ComPtr<ID3DBlob> rootSigBlob = nullptr;
+	//result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
+	//assert(SUCCEEDED(result));
+	//result = device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSignature));
+	//assert(SUCCEEDED(result));
 
 
-	// パイプラインにルートシグネチャをセット
-	pipelineDesc.pRootSignature = rootSignature.Get();
+	//// パイプラインにルートシグネチャをセット
+	//pipelineDesc.pRootSignature = rootSignature.Get();
 
-	//デスステンシルステートの設定
-	pipelineDesc.DepthStencilState.DepthEnable = true;//深度テストを行う
-	pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//書き込み許可
-	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;//小さければ合格
-	pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;//深度値フォーマット
+	////デスステンシルステートの設定
+	//pipelineDesc.DepthStencilState.DepthEnable = true;//深度テストを行う
+	//pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//書き込み許可
+	//pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;//小さければ合格
+	//pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;//深度値フォーマット
 
-	// パイプランステートの生成
-	ComPtr<ID3D12PipelineState> pipelineState = nullptr;
-	result = device->CreateGraphicsPipelineState(&pipelineDesc, IID_PPV_ARGS(&pipelineState));
-	assert(SUCCEEDED(result));
+	//// パイプラインステートの生成
+	//ComPtr<ID3D12PipelineState> pipelineState = nullptr;
+	//result = device->CreateGraphicsPipelineState(&pipelineDesc, IID_PPV_ARGS(&pipelineState));
+	//assert(SUCCEEDED(result));
 
 
-
+PipelineSet object3dPipelineSet = Pipeline3D(device.Get());
 
 	// ヒープ設定
 	D3D12_HEAP_PROPERTIES cbHeapProp{};
@@ -792,6 +1152,97 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	//3Dオブジェクトの配列
 	Object3d object3ds[kObjectCount];
 
+	const size_t BlockCount = 1000;
+	Object3d blocks[BlockCount];
+
+	const float blockSize = 5.0f;
+	//オブジェクトの配置
+	for (int i = 0; i < _countof(blocks); i++)
+	{
+		InitializeObject3d(&blocks[i], device.Get());
+		blocks[i].position = { 0.0f,0.0f,-100.0f };
+		blocks[i].scale = { blockSize,blockSize,blockSize };
+	}
+
+	blocks[0].position = { blockSize * 0,blockSize * 10,blockSize * 50 };
+	blocks[1].position = { blockSize * 0,blockSize * -10,blockSize * 50 };
+
+	blocks[2].position = { blockSize * 10,blockSize * 0,blockSize * 100 };
+	blocks[3].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
+
+	blocks[4].position = { blockSize * -10,blockSize * 10,blockSize * 150 };
+	blocks[5].position = { blockSize * 0,blockSize * 10,blockSize * 150 };
+	blocks[6].position = { blockSize * 10,blockSize * 10,blockSize * 150 };
+	blocks[7].position = { blockSize * 10,blockSize * 0,blockSize * 150 };
+	blocks[8].position = { blockSize * 10,blockSize * -10,blockSize * 150 };
+	blocks[9].position = { blockSize * 0,blockSize * -10,blockSize * 150 };
+	blocks[10].position = { blockSize * -10,blockSize * -10,blockSize * 150 };
+	blocks[11].position = { blockSize * -10,blockSize * 0,blockSize * 150 };
+
+	blocks[12].position = { blockSize * 0,blockSize * 10,blockSize * 200 };
+	blocks[13].position = { blockSize * 0,blockSize * 0,blockSize * 200 };
+	blocks[14].position = { blockSize * 0,blockSize * -10,blockSize * 200 };
+
+	blocks[15].position = { blockSize * 10,blockSize * 0,blockSize * 250 };
+	blocks[16].position = { blockSize * 0,blockSize * 0,blockSize * 250 };
+	blocks[17].position = { blockSize * -10,blockSize * 0,blockSize * 250 };
+
+	blocks[18].position = { blockSize * -10,blockSize * 10,blockSize * 300 };
+	blocks[19].position = { blockSize * 0,blockSize * 0,blockSize * 300 };
+	blocks[20].position = { blockSize * 10,blockSize * -10,blockSize * 300 };
+
+	blocks[21].position = { blockSize * 10,blockSize * 10,blockSize * 330 };
+	blocks[22].position = { blockSize * 0,blockSize * 0,blockSize * 330 };
+	blocks[23].position = { blockSize * -10,blockSize * -10,blockSize * 330 };
+
+	blocks[24].position = { blockSize * -10,blockSize * 10,blockSize * 360 };
+	blocks[25].position = { blockSize * 10,blockSize * -10,blockSize * 360 };
+	blocks[26].position = { blockSize * 10,blockSize * 10,blockSize * 360 };
+	blocks[27].position = { blockSize * 0,blockSize * 0,blockSize * 360 };
+	blocks[28].position = { blockSize * -10,blockSize * -10,blockSize * 360 };
+
+	blocks[29].position = { blockSize * 5,blockSize * 5,blockSize * 450 };
+	blocks[30].position = { blockSize * 5,blockSize * -5,blockSize * 480 };
+	blocks[31].position = { blockSize * -5,blockSize * -5,blockSize * 510 };
+	blocks[32].position = { blockSize * -5,blockSize * 5,blockSize * 540 };
+
+	blocks[33].position = { blockSize * -5,blockSize * 5,blockSize * 600 };
+	blocks[34].position = { blockSize * 5,blockSize * -5,blockSize * 600 };
+
+	blocks[35].position = { blockSize * -5,blockSize * -5,blockSize * 630 };
+	blocks[36].position = { blockSize * 5,blockSize * 5,blockSize * 630 };
+
+	blocks[37].position = { blockSize * -5,blockSize * 5,blockSize * 660 };
+	blocks[38].position = { blockSize * 5,blockSize * 5,blockSize * 660 };
+
+	blocks[39].position = { blockSize * 5,blockSize * -5,blockSize * 690 };
+	blocks[40].position = { blockSize * -5,blockSize * -5,blockSize * 690 };
+
+	blocks[41].position = { blockSize * 5,blockSize * -5,blockSize * 750 };
+	blocks[42].position = { blockSize * 5,blockSize * 5,blockSize * 750 };
+	blocks[43].position = { blockSize * -5,blockSize * 5,blockSize * 750 };
+
+	blocks[44].position = { blockSize * 5,blockSize * -5,blockSize * 800 };
+	blocks[45].position = { blockSize * -5,blockSize * -5,blockSize * 800 };
+	blocks[46].position = { blockSize * -5,blockSize * 5,blockSize * 800 };
+
+	for (int i = 47; i < 97; i++) {
+		blocks[i].position = { blockSize * 5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 50].position = { blockSize * -5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 100].position = { blockSize * 5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 150].position = { blockSize * -5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+
+		blocks[i + 200].position = { blockSize * 15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 250].position = { blockSize * 15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 300].position = { blockSize * -15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 350].position = { blockSize * -15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
+
+		blocks[i + 400].position = { blockSize * -15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 450].position = { blockSize * -15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 500].position = { blockSize * 15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+		blocks[i + 550].position = { blockSize * 15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+	}
+
 	for (int i = 0; i < _countof(object3ds); i++) {
 		//初期化
 		InitializeObject3d(&object3ds[i], device.Get());
@@ -811,20 +1262,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 		//}
 	}
 
-	//3Dオブジェクトの数
-	const size_t kBlockCount = 10;
-	//3Dオブジェクトの配列
-	Object3d block3ds[kBlockCount];
-
-	for (int i = 0; i < _countof(block3ds); i++) {
-		//初期化
-		InitializeObject3d(&block3ds[i], device.Get());
-
-		block3ds[0].position = { 10,10,0 };
-		block3ds[0].scale = { 2.0,2.0,2.0 };
-
-	}
-
+	object3ds[0].position.z = 50;
 	////平行投影行列の計算
 	//constMapTransform->mat = XMMatrixOrthographicOffCenterLH(
 	//0.0f,window_width,
@@ -841,7 +1279,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 	//ビュー変換行列
 	XMMATRIX matView;
-	XMFLOAT3 eye(0, 0, -500);	//視点座標
+	XMFLOAT3 eye(0, 5, -100);	//視点座標
 	XMFLOAT3 target(0, 0, 0);	//注視点座標
 	XMFLOAT3 up(0, 1, 0);		//上方向ベクトル
 	matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
@@ -948,7 +1386,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 	// WICテクスチャのロード
 	result = LoadFromWICFile(
-		L"Resources/reimu.png",   //「Resources」フォルダの「reimu.jpg」
+		L"Resources/block.png",   //「Resources」フォルダの「reimu.jpg」
 		WIC_FLAGS_NONE,
 		&metadata2, scratchImg2);
 	ScratchImage mipChain2{};
@@ -1090,8 +1528,8 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	ibView.SizeInBytes = sizeIB;
 
 
-
-
+	//スプライト用パイプライン
+	PipelineSet spritePipelineSet;
 
 	//描画初期化処理 ここまで
 
@@ -1109,441 +1547,312 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 			break;
 		}
 		//DirectX毎フレーム処理 ここから
-		//シーン管理
-		if (scene ==Scene::Title) {
-			// キーボード情報の取得開始
-			keyboard->Acquire();
 
-			// 全キーの入力状態を取得する
-			BYTE key[256] = {};
-			keyboard->GetDeviceState(sizeof(key), key);
+		// キーボード情報の取得開始
+		keyboard->Acquire();
 
-
-
-			// バックバッファの番号を取得(2つなので0番か1番)
-			UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
-			// 1.リソースバリアで書き込み可能に変更
-			D3D12_RESOURCE_BARRIER barrierDesc{};
-			barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
-			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
-			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
-			commandList->ResourceBarrier(1, &barrierDesc);
-
-			// 2.描画先の変更
-			// レンダーターゲットビューのハンドルを取得
-			D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
-			rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
-			//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
-			D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
-			commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
+		// 全キーの入力状態を取得する
+		BYTE key[256] = {};
+		keyboard->GetDeviceState(sizeof(key), key);
 
 
 
+		// バックバッファの番号を取得(2つなので0番か1番)
+		UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
+		// 1.リソースバリアで書き込み可能に変更
+		D3D12_RESOURCE_BARRIER barrierDesc{};
+		barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
+		barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
+		barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
+		commandList->ResourceBarrier(1, &barrierDesc);
 
-			// 3.画面クリア R G B A
-			FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
-
-			////スペースキーが押されたら
-			//if (key[DIK_SPACE]) {
-			//	clearColor[0] = { 0.7f };
-			//}
-
-
-			commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-			commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-			for (int i = 0; i < _countof(indices) / 3; i++)
-			{
-				//三角形1つごとに計算していく
-				//三角形のインデックスを取り出して、一時的な変数に入れる
-				unsigned short indices0 = indices[i * 3 + 0];
-				unsigned short indices1 = indices[i * 3 + 1];
-				unsigned short indices2 = indices[i * 3 + 2];
-				//三角形を構成する頂点座標をベクトルに代入
-				XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
-				XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
-				XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
-				//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
-				XMVECTOR v1 = XMVectorSubtract(p1, p0);
-				XMVECTOR v2 = XMVectorSubtract(p2, p0);
-				//外積は両方から垂直なベクトル
-				XMVECTOR normal = XMVector3Cross(v1, v2);
-				//正規化(長さを1にする)
-				normal = XMVector3Normalize(normal);
-				//求めた法線を頂点データに代入
-				XMStoreFloat3(&vertices[indices0].normal, normal);
-				XMStoreFloat3(&vertices[indices1].normal, normal);
-				XMStoreFloat3(&vertices[indices2].normal, normal);
-
-			}
-
-			// 全頂点に対して
-			for (int i = 0; i < _countof(vertices); i++) {
-				vertMap[i] = vertices[i]; // 座標をコピー
-			}
+		// 2.描画先の変更
+		// レンダーターゲットビューのハンドルを取得
+		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+		rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
+		//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
+		D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+		commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
 
 
 
-			//カメラ
-			if (key[DIK_D] || key[DIK_A]) {
-				if (key[DIK_D]) {
-					angle += XMConvertToRadians(1.0f);
-				}
-				else if (key[DIK_A]) {
-					angle -= XMConvertToRadians(1.0f);
-				}
-				//angleラジアンだけY軸周りに回転。半径は-100
-				eye.x = -100 * sinf(angle);
-				eye.z = -100 * cosf(angle);
 
-				//ビュー変換行列
-				matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-			}
-
-			for (size_t i = 0; i < _countof(object3ds); i++)
-			{
-				UpdateObject3d(&object3ds[i], matView, matProjection);
-			}
-
-			for (size_t i = 0; i < _countof(block3ds); i++)
-			{
-				UpdateObject3d(&block3ds[i], matView, matProjection);
-			}
-
-			if (key[DIK_SPACE]) {
-				scene = Scene::GameScene;
-			}
-
-
-			// 4.描画コマンドここから
-
-			// ビューポート設定コマンド
-			D3D12_VIEWPORT viewport{};
-			viewport.Width = window_width;
-			viewport.Height = window_height;
-			viewport.TopLeftX = 0;
-			viewport.TopLeftY = 0;
-			viewport.MinDepth = 0.0f;
-			viewport.MaxDepth = 1.0f;
-			// ビューポート設定コマンドを、コマンドリストに積む
-			commandList->RSSetViewports(1, &viewport);
-
-			// シザー矩形
-			D3D12_RECT scissorRect{};
-			scissorRect.left = 0;                                       // 切り抜き座標左
-			scissorRect.right = window_width;        // 切り抜き座標右
-			scissorRect.top = 0;                                        // 切り抜き座標上
-			scissorRect.bottom = window_height;		// 切り抜き座標下
-
-
-
-			// シザー矩形設定コマンドを、コマンドリストに積む
-			commandList->RSSetScissorRects(1, &scissorRect);
-
-			// パイプラインステートとルートシグネチャの設定コマンド
-			commandList->SetPipelineState(pipelineState.Get());
-			commandList->SetGraphicsRootSignature(rootSignature.Get());
-
-			// プリミティブ形状の設定コマンド
-			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
-
-			// 頂点バッファビューの設定コマンド
-			commandList->IASetVertexBuffers(0, 1, &vbView);
-
-			// 定数バッファビュー(CBV)の設定コマンド
-			commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
-
-			ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
-			// SRVヒープの設定コマンド
-			commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-			// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
-			D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
-
-			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-
-			// インデックスバッファビューの設定コマンド
-			commandList->IASetIndexBuffer(&ibView);
-
-
-			//全オブジェクトについて処理
-			for (int i = 0; i < _countof(object3ds); i++) {
-				DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-			}
-
-			//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
-			srvGpuHandle.ptr += incrementSize;
-			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-			//障害物
-			for (int i = 0; i < _countof(block3ds); i++) {
-				DrawObject3d(&block3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-			}
-
-			// 4.描画コマンドここまで
-
-			// 5.リソースバリアを戻す
-			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
-			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
-			commandList->ResourceBarrier(1, &barrierDesc);
-
-			// 命令のクローズ
-			result = commandList->Close();
-			assert(SUCCEEDED(result));
-			// コマンドリストの実行
-			ID3D12CommandList* commandLists[] = { commandList.Get() };
-			commandQueue->ExecuteCommandLists(1, commandLists);
-			// 画面に表示するバッファをフリップ(裏表の入替え)
-			result = swapChain->Present(1, 0);
-			assert(SUCCEEDED(result));
-
-			// コマンドの実行完了を待つ
-			commandQueue->Signal(fence.Get(), ++fenceVal);
-			if (fence->GetCompletedValue() != fenceVal) {
-				HANDLE event = CreateEvent(nullptr, false, false, nullptr);
-				if (event == NULL) {
-
-				}
-				else {
-					fence->SetEventOnCompletion(fenceVal, event);
-					WaitForSingleObject(event, INFINITE);
-					CloseHandle(event);
-				}
-			}
-			// キューをクリア
-			result = cmdAllocator->Reset();
-			assert(SUCCEEDED(result));
-			// 再びコマンドリストを貯める準備
-			result = commandList->Reset(cmdAllocator.Get(), nullptr);
-			assert(SUCCEEDED(result));
+		// 3.画面クリア R G B A
+		FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
+		//スペースキーが押されたら
+		if (key[DIK_SPACE]) {
+			//clearColor[0] = { 0.7f };
 		}
-		else if (scene==Scene::GameScene) {
+		commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+		commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-			// キーボード情報の取得開始
-			keyboard->Acquire();
-
-			// 全キーの入力状態を取得する
-			BYTE key[256] = {};
-			keyboard->GetDeviceState(sizeof(key), key);
-
-
-
-			// バックバッファの番号を取得(2つなので0番か1番)
-			UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
-			// 1.リソースバリアで書き込み可能に変更
-			D3D12_RESOURCE_BARRIER barrierDesc{};
-			barrierDesc.Transition.pResource = backBuffers[bbIndex].Get(); // バックバッファを指定
-			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT; // 表示状態から
-			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態へ
-			commandList->ResourceBarrier(1, &barrierDesc);
-
-			// 2.描画先の変更
-			// レンダーターゲットビューのハンドルを取得
-			D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
-			rtvHandle.ptr += bbIndex * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
-			//深度ステンシルビュー用デスクリプタヒープのハンドルを取得
-			D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
-			commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
-
-
-
-
-			// 3.画面クリア R G B A
-			FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
-
-			////スペースキーが押されたら
-			//if (key[DIK_SPACE]) {
-			//	clearColor[0] = { 0.7f };
-			//}
-
-
-			commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-			commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-			for (int i = 0; i < _countof(indices) / 3; i++)
-			{
-				//三角形1つごとに計算していく
-				//三角形のインデックスを取り出して、一時的な変数に入れる
-				unsigned short indices0 = indices[i * 3 + 0];
-				unsigned short indices1 = indices[i * 3 + 1];
-				unsigned short indices2 = indices[i * 3 + 2];
-				//三角形を構成する頂点座標をベクトルに代入
-				XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
-				XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
-				XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
-				//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
-				XMVECTOR v1 = XMVectorSubtract(p1, p0);
-				XMVECTOR v2 = XMVectorSubtract(p2, p0);
-				//外積は両方から垂直なベクトル
-				XMVECTOR normal = XMVector3Cross(v1, v2);
-				//正規化(長さを1にする)
-				normal = XMVector3Normalize(normal);
-				//求めた法線を頂点データに代入
-				XMStoreFloat3(&vertices[indices0].normal, normal);
-				XMStoreFloat3(&vertices[indices1].normal, normal);
-				XMStoreFloat3(&vertices[indices2].normal, normal);
-
-			}
-
-			// 全頂点に対して
-			for (int i = 0; i < _countof(vertices); i++) {
-				vertMap[i] = vertices[i]; // 座標をコピー
-			}
-
-
-
-			//カメラ
-			if (key[DIK_D] || key[DIK_A]) {
-				if (key[DIK_D]) {
-					angle += XMConvertToRadians(1.0f);
-				}
-				else if (key[DIK_A]) {
-					angle -= XMConvertToRadians(1.0f);
-				}
-				//angleラジアンだけY軸周りに回転。半径は-100
-				eye.x = -100 * sinf(angle);
-				eye.z = -100 * cosf(angle);
-
-				//ビュー変換行列
-				matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-			}
-
-
-
-			//自機の座標操作
-
-			isUp = 0;
-
-			if (key[DIK_UP] || key[DIK_DOWN] || key[DIK_RIGHT] || key[DIK_LEFT] || key[DIK_SPACE])
-			{
-				if (key[DIK_UP]) { object3ds[0].position.z += 1.0f; }
-				else if (key[DIK_DOWN]) { object3ds[0].position.z -= 1.0f; }
-				if (key[DIK_RIGHT]) { object3ds[0].position.x += 1.0f; }
-				else if (key[DIK_LEFT]) { object3ds[0].position.x -= 1.0f; }
-				if (key[DIK_SPACE]) { isUp = 1; }
-			}
-			if (isUp == 0) {
-				object3ds[0].position.y += gravity;
-			}
-			else if (isUp == 1) {
-				object3ds[0].position.y -= gravity;
-			}
-
-			for (size_t i = 0; i < _countof(object3ds); i++)
-			{
-				UpdateObject3d(&object3ds[i], matView, matProjection);
-			}
-
-			for (size_t i = 0; i < _countof(block3ds); i++)
-			{
-				UpdateObject3d(&block3ds[i], matView, matProjection);
-			}
-
-
-			// 4.描画コマンドここから
-
-			// ビューポート設定コマンド
-			D3D12_VIEWPORT viewport{};
-			viewport.Width = window_width;
-			viewport.Height = window_height;
-			viewport.TopLeftX = 0;
-			viewport.TopLeftY = 0;
-			viewport.MinDepth = 0.0f;
-			viewport.MaxDepth = 1.0f;
-			// ビューポート設定コマンドを、コマンドリストに積む
-			commandList->RSSetViewports(1, &viewport);
-
-			// シザー矩形
-			D3D12_RECT scissorRect{};
-			scissorRect.left = 0;                                       // 切り抜き座標左
-			scissorRect.right = window_width;        // 切り抜き座標右
-			scissorRect.top = 0;                                        // 切り抜き座標上
-			scissorRect.bottom = window_height;		// 切り抜き座標下
-
-
-
-			// シザー矩形設定コマンドを、コマンドリストに積む
-			commandList->RSSetScissorRects(1, &scissorRect);
-
-			// パイプラインステートとルートシグネチャの設定コマンド
-			commandList->SetPipelineState(pipelineState.Get());
-			commandList->SetGraphicsRootSignature(rootSignature.Get());
-
-			// プリミティブ形状の設定コマンド
-			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
-
-			// 頂点バッファビューの設定コマンド
-			commandList->IASetVertexBuffers(0, 1, &vbView);
-
-			// 定数バッファビュー(CBV)の設定コマンド
-			commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
-
-			ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
-			// SRVヒープの設定コマンド
-			commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-			// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
-			D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
-
-			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-
-			// インデックスバッファビューの設定コマンド
-			commandList->IASetIndexBuffer(&ibView);
-
-
-			//全オブジェクトについて処理
-			for (int i = 0; i < _countof(object3ds); i++) {
-				DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-			}
-
-			//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
-			srvGpuHandle.ptr += incrementSize;
-			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-			//障害物
-			for (int i = 0; i < _countof(block3ds); i++) {
-				DrawObject3d(&block3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-			}
-
-			// 4.描画コマンドここまで
-
-			// 5.リソースバリアを戻す
-			barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
-			barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
-			commandList->ResourceBarrier(1, &barrierDesc);
-
-			// 命令のクローズ
-			result = commandList->Close();
-			assert(SUCCEEDED(result));
-			// コマンドリストの実行
-			ID3D12CommandList* commandLists[] = { commandList.Get() };
-			commandQueue->ExecuteCommandLists(1, commandLists);
-			// 画面に表示するバッファをフリップ(裏表の入替え)
-			result = swapChain->Present(1, 0);
-			assert(SUCCEEDED(result));
-
-			// コマンドの実行完了を待つ
-			commandQueue->Signal(fence.Get(), ++fenceVal);
-			if (fence->GetCompletedValue() != fenceVal) {
-				HANDLE event = CreateEvent(nullptr, false, false, nullptr);
-				if (event == NULL) {
-
-				}
-				else {
-					fence->SetEventOnCompletion(fenceVal, event);
-					WaitForSingleObject(event, INFINITE);
-					CloseHandle(event);
-				}
-			}
-			// キューをクリア
-			result = cmdAllocator->Reset();
-			assert(SUCCEEDED(result));
-			// 再びコマンドリストを貯める準備
-			result = commandList->Reset(cmdAllocator.Get(), nullptr);
-			assert(SUCCEEDED(result));
-
-			//DirectX毎フレーム処理 ここまで
+		for (int i = 0; i < _countof(indices) / 3; i++)
+		{//三角形1つごとに計算していく
+			//三角形のインデックスを取り出して、一時的な変数に入れる
+			unsigned short indices0 = indices[i * 3 + 0];
+			unsigned short indices1 = indices[i * 3 + 1];
+			unsigned short indices2 = indices[i * 3 + 2];
+			//三角形を構成する頂点座標をベクトルに代入
+			XMVECTOR p0 = XMLoadFloat3(&vertices[indices0].pos);
+			XMVECTOR p1 = XMLoadFloat3(&vertices[indices1].pos);
+			XMVECTOR p2 = XMLoadFloat3(&vertices[indices2].pos);
+			//p0→p1ベクトル、p0→p2ベクトルを計算(ベクトルの減算)
+			XMVECTOR v1 = XMVectorSubtract(p1, p0);
+			XMVECTOR v2 = XMVectorSubtract(p2, p0);
+			//外積は両方から垂直なベクトル
+			XMVECTOR normal = XMVector3Cross(v1, v2);
+			//正規化(長さを1にする)
+			normal = XMVector3Normalize(normal);
+			//求めた法線を頂点データに代入
+			XMStoreFloat3(&vertices[indices0].normal, normal);
+			XMStoreFloat3(&vertices[indices1].normal, normal);
+			XMStoreFloat3(&vertices[indices2].normal, normal);
 		}
+
+		// 全頂点に対して
+		for (int i = 0; i < _countof(vertices); i++) {
+			vertMap[i] = vertices[i]; // 座標をコピー
+		}
+
+
+
+		//カメラ
+		//if (key[DIK_Z] || key[DIK_X]) {
+		//	if (key[DIK_Z]) {
+		//		angle += XMConvertToRadians(1.0f);
+		//	}
+		//	else if (key[DIK_X]) {
+		//		angle -= XMConvertToRadians(1.0f);
+		//	}
+		//	//angleラジアンだけY軸周りに回転。半径は-100
+		//	eye.x = -200 * sinf(angle);
+		//	eye.z = -200 * cosf(angle);
+		//	//ビュー変換行列
+		//	matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+		//}
+
+		//キャラクターのスピード
+		const float charaSpeed = 1.0f;
+		//キーボード入力による移動処理	
+		isUp = 0;
+
+		if (key[DIK_LEFT] || key[DIK_A]) {
+			move = { -charaSpeed, 0, 0 };
+		}
+		else if (key[DIK_RIGHT] || key[DIK_D]) {
+			move = { +charaSpeed, 0, 0 };
+		}
+		else {
+			move = { 0,0,0 };
+		}
+
+		if (key[DIK_SPACE]) {
+
+			if (upSpeed <= 1.5) {
+				upSpeed += 0.1f;
+			}
+		}
+		else {
+
+			if (upSpeed > -1.5) {
+				upSpeed -= 0.1f;
+			}
+			else {
+				upSpeed = -1.5f;
+			}
+		}
+
+
+
+		object3ds[0].position.y += upSpeed;
+
+		object3ds[0].position.x += move.x;
+		object3ds[0].position.y += move.y;
+		object3ds[0].position.z += move.z;
+
+		if (isDead == false) {
+			eye.z += 1.0f;
+			target.z += 1.0f;
+			matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+		}
+		else {
+
+		}
+
+
+		//座標操作
+		object3ds[0].position.z += 1.0f;
+
+		for (size_t i = 0; i < _countof(object3ds); i++)
+		{
+			UpdateObject3d(&object3ds[i], matView, matProjection);
+		}
+
+		for (size_t i = 0; i < _countof(blocks); i++)
+		{
+			UpdateObject3d(&blocks[i], matView, matProjection);
+		}
+
+		//画面外の処理
+		const float posLimitX = 60;
+		const float posLimitY = 60;
+		//x座標
+		if (object3ds[0].position.x > posLimitX) {
+			object3ds[0].position.x = posLimitX;
+		}
+		else if (object3ds[0].position.x < -posLimitX) {
+			object3ds[0].position.x = -posLimitX;
+		}
+		//y座標
+		if (object3ds[0].position.y > posLimitY) {
+			object3ds[0].position.y = posLimitY;
+		}
+		else if (object3ds[0].position.y < -posLimitY) {
+			object3ds[0].position.y = -posLimitY;
+		}
+
+		//リセット
+		if (key[DIK_R]) {
+			object3ds[0].position.x = 0;
+			object3ds[0].position.y = 0;
+			object3ds[0].position.z = 50;
+
+			isDead = false;
+			eye.z = -100;
+			target.z = 0;
+			matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+		}
+
+
+		//当たり判定
+		for (size_t i = 0; i < _countof(blocks); i++)
+		{
+			if (CheakCollision(object3ds[0].position, blocks[i].position, object3ds[0].scale, blocks[i].scale))
+			{
+				object3ds[0].position.x = 1000;
+				object3ds[0].position.y = 1000;
+				object3ds[0].position.z = -1000;
+				isDead = true;
+			}
+
+		}
+
+		// 4.描画コマンドここから
+
+		// ビューポート設定コマンド
+		D3D12_VIEWPORT viewport{};
+		viewport.Width = window_width;
+		viewport.Height = window_height;
+		viewport.TopLeftX = 0;
+		viewport.TopLeftY = 0;
+		viewport.MinDepth = 0.0f;
+		viewport.MaxDepth = 1.0f;
+		// ビューポート設定コマンドを、コマンドリストに積む
+		commandList->RSSetViewports(1, &viewport);
+
+		// シザー矩形
+		D3D12_RECT scissorRect{};
+		scissorRect.left = 0;                                       // 切り抜き座標左
+		scissorRect.right = window_width;        // 切り抜き座標右
+		scissorRect.top = 0;                                        // 切り抜き座標上
+		scissorRect.bottom = window_height;		// 切り抜き座標下
+
+
+
+		// シザー矩形設定コマンドを、コマンドリストに積む
+		commandList->RSSetScissorRects(1, &scissorRect);
+
+		// パイプラインステートとルートシグネチャの設定コマンド
+		commandList->SetPipelineState(object3dPipelineSet.pipelinestate.Get());
+		commandList->SetGraphicsRootSignature(object3dPipelineSet.rootsignature.Get());
+
+		// プリミティブ形状の設定コマンド
+		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); // 三角形リスト
+
+		// 頂点バッファビューの設定コマンド
+		commandList->IASetVertexBuffers(0, 1, &vbView);
+
+		// 定数バッファビュー(CBV)の設定コマンド
+		commandList->SetGraphicsRootConstantBufferView(0, constBuffMaterial->GetGPUVirtualAddress());
+
+		ID3D12DescriptorHeap* ppHeaps[] = { srvHeap.Get() };
+		// SRVヒープの設定コマンド
+		commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+		// SRVヒープの先頭ハンドルを取得（SRVを指しているはず）
+		D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+		// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+		commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+
+		// インデックスバッファビューの設定コマンド
+		commandList->IASetIndexBuffer(&ibView);
+
+
+		//全オブジェクトについて処理
+		for (int i = 0; i < _countof(object3ds); i++) {
+			DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
+		}
+		//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
+		srvGpuHandle.ptr += incrementSize;
+		// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+		commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+
+		for (int i = 0; i < _countof(blocks); i++)
+		{
+			if (blocks[i].position.z > eye.z && blocks[i].position.z <= eye.z + 1000) {
+				if (blocks[i].position.x < eye.x + 40 &&
+					blocks[i].position.x > eye.x - 40 &&
+					blocks[i].position.y < eye.y + 40 &&
+					blocks[i].position.y > eye.y - 40 &&
+					blocks[i].position.z < eye.z + 120) {
+					continue;
+				}
+				DrawObject3d(&blocks[i], commandList.Get(), vbView, ibView, _countof(indices));
+			}
+		}
+
+		//スプライト共通コマンド
+		SpriteCommonBeginDraw(commandList.Get(),spritePipelineSet, rtvHeap.Get());
+		//スプライト描画
+		SpriteDraw(sprite, commandList.Get());
+
+		// 4.描画コマンドここまで
+
+		// 5.リソースバリアを戻す
+		barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; // 描画状態から
+		barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT; // 表示状態へ
+		commandList->ResourceBarrier(1, &barrierDesc);
+
+		// 命令のクローズ
+		result = commandList->Close();
+		assert(SUCCEEDED(result));
+		// コマンドリストの実行
+		ID3D12CommandList* commandLists[] = { commandList.Get() };
+		commandQueue->ExecuteCommandLists(1, commandLists);
+		// 画面に表示するバッファをフリップ(裏表の入替え)
+		result = swapChain->Present(1, 0);
+		assert(SUCCEEDED(result));
+
+		// コマンドの実行完了を待つ
+		commandQueue->Signal(fence.Get(), ++fenceVal);
+		if (fence->GetCompletedValue() != fenceVal) {
+			HANDLE event = CreateEvent(nullptr, false, false, nullptr);
+			if (event == NULL) {
+
+			}
+			else {
+				fence->SetEventOnCompletion(fenceVal, event);
+				WaitForSingleObject(event, INFINITE);
+				CloseHandle(event);
+			}
+		}
+		// キューをクリア
+		result = cmdAllocator->Reset();
+		assert(SUCCEEDED(result));
+		// 再びコマンドリストを貯める準備
+		result = commandList->Reset(cmdAllocator.Get(), nullptr);
+		assert(SUCCEEDED(result));
+
+		//DirectX毎フレーム処理 ここまで
 	}
 	//ウィンドウクラスを登録解除
 	UnregisterClass(w.lpszClassName, w.hInstance);

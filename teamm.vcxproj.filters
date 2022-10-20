@@ -26,9 +26,18 @@
     <FxCompile Include="Resources\shaders\BasicPS.hlsl">
       <Filter>ソース ファイル</Filter>
     </FxCompile>
+    <FxCompile Include="SpriteVS.hlsl">
+      <Filter>ソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="SprtitePS.hlsl">
+      <Filter>ソース ファイル</Filter>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="Resources\shaders\Basic.hlsli">
+      <Filter>ソース ファイル</Filter>
+    </None>
+    <None Include="Sprite.hlsli">
       <Filter>ソース ファイル</Filter>
     </None>
   </ItemGroup>
