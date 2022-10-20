@@ -26,10 +26,10 @@
     <FxCompile Include="Resources\shaders\BasicPS.hlsl">
       <Filter>ソース ファイル</Filter>
     </FxCompile>
-    <FxCompile Include="SpriteVS.hlsl">
+    <FxCompile Include="Resources\shaders\SpriteVS.hlsl">
       <Filter>ソース ファイル</Filter>
     </FxCompile>
-    <FxCompile Include="SprtitePS.hlsl">
+    <FxCompile Include="Resources\shaders\SpritePS.hlsl">
       <Filter>ソース ファイル</Filter>
     </FxCompile>
   </ItemGroup>
@@ -37,7 +37,7 @@
     <None Include="Resources\shaders\Basic.hlsli">
       <Filter>ソース ファイル</Filter>
     </None>
-    <None Include="Sprite.hlsli">
+    <None Include="Resources\shaders\Sprite.hlsli">
       <Filter>ソース ファイル</Filter>
     </None>
   </ItemGroup>
