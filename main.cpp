@@ -1,9 +1,14 @@
+#include"Input.h"
+#include"Winapp.h"
+
 #include <d3dcompiler.h>
 #include <DirectXTex.h>
 #include <Windows.h>
+
 #include <d3d12.h>
 #include<d3dx12.h>
 #include <dxgi1_6.h>
+
 #include <cassert>
 #include <vector>
 #include <string>
@@ -13,6 +18,12 @@
 #include<stdio.h>
 #include<wchar.h>
 #include <wrl.h>
+
+#include <xaudio2.h>
+
+#pragma comment(lib,"xaudio2.lib")
+#include <fstream>
+
 using namespace Microsoft::WRL;
 using namespace DirectX;
 #pragma comment (lib,"d3dcompiler.lib")
@@ -27,8 +38,14 @@ using namespace DirectX;
 
 const float PI = 3.141592f;
 
-const int window_width = 1200; //横幅
+const int window_width = 1280; //横幅
 const int window_height = 720; //縦幅
+
+enum Scene {
+	title,
+	game
+};
+
 //テクスチャの最大枚数
 const int spriteSRVCount = 512;
 
@@ -55,6 +72,7 @@ struct VertexPosUv
 	XMFLOAT2 uv;	//uv座標
 };
 
+
 //パイプラインセット
 struct PipelineSet
 {
@@ -73,9 +91,9 @@ struct Sprite
 	float rotation = 0.0f;			//Z軸周りの回転軸
 	XMFLOAT3 position = { 0,0,0 };	//座標
 	XMMATRIX matWorld;				//ワールド行列
-	XMFLOAT4 color = { 1,1,1,1 };	//色
+	//XMFLOAT4 color = { 1,1,1,1 };	//色
 	UINT texNumber = 0;				//テキスト番号
-	XMFLOAT2 size = { 100,100 };	//大きさ
+	XMFLOAT2 size = { 100,100 };
 };
 
 //スプライトの共通データ
@@ -110,20 +128,152 @@ struct Object3d
 };
 
 
+// チャンクヘッダ
+struct ChunkHeader
+{
+	char id[4]; // 1チャンク毎のID
+	int32_t size; // チャンクサイズ
+};
 
+// RIFEヘッダチャンク
+struct RiffHeader {
+	ChunkHeader chunk; // "RIFF"
+	char type[4]; // "WAVE"
+};
+
+// FMTチャンク
+struct FormatChunk
+{
+	ChunkHeader chunk; // "fnt"
+	WAVEFORMATEX fmt; // 波形フォーマット
+};
+
+// 音声データ
+struct SoundData
+{
+	// 波形フォーマット
+	WAVEFORMATEX wfex;
+	// バッファの先頭アドレス
+	BYTE* pBuffer;
+	// バッファのサイズ
+	unsigned int bufferSize;
+};
+
+// サウンドの読み込み関数
+SoundData SoundLoadWave(const char* filename)
+{
+	HRESULT result;
+
+	// ファイル入力ストリームのインスタンス
+	std::ifstream file;
+	// .wavファイルをバイナリモードで開く
+	file.open(filename, std::ios_base::binary);
+	// ファイルオープンを失敗を検出する
+	assert(file.is_open());
+
+	// RIFEヘッダーの読み込み
+	RiffHeader riff;
+	file.read((char*)&riff, sizeof(riff));
+	// ファイルがRIFEかチェックする
+	if (strncmp(riff.chunk.id, "RIFF", 4) != 0)
+	{
+		assert(0);
+	}
+	// タイプがWAVEかチェック
+	if (strncmp(riff.type, "WAVE", 4) != 0)
+	{
+		assert(0);
+	}
+
+	// Formatチャンクの読み込み
+	FormatChunk format = {};
+	// チャンクヘッダーの確認
+	file.read((char*)&format, sizeof(ChunkHeader));
+	if (strncmp(format.chunk.id, "fmt ", 4) != 0)
+	{
+		assert(0);
+	}
+
+	// チャンク本体の読み込み
+	assert(format.chunk.size <= sizeof(format.fmt));
+	file.read((char*)&format.fmt, format.chunk.size);
+
+	// Dateチャンクの読み込み
+	ChunkHeader data;
+	file.read((char*)&data, sizeof(data));
+	// JUNKチャンクを検出した場合
+	if (strncmp(data.id, "JUNK ", 4) == 0)
+	{
+		// 読み取り位置をJUNKチャンクの終わりまで進める
+		file.seekg(data.size, std::ios_base::cur);
+		// 再読み込み
+		file.read((char*)&data, sizeof(data));
+	}
+	if (strncmp(data.id, "data ", 4) != 0)
+	{
+		assert(0);
+	}
+
+	// Dataチャンクのデータ部（波形データ）の読み込み
+	char* pBuffer = new char[data.size];
+	file.read(pBuffer, data.size);
+
+	// Waveファイルと閉じる
+	file.close();
+
+	// returnする為の音声データ
+	SoundData soundData = {};
+
+	soundData.wfex = format.fmt;
+	soundData.pBuffer = reinterpret_cast<BYTE*>(pBuffer);
+	soundData.bufferSize = data.size;
+
+	return soundData;
+}
+
+// 音声データの開放
+void SoundUnload(SoundData* soundData)
+{
+	// バッファのメモリを解放
+	delete[] soundData->pBuffer;
+
+	soundData->pBuffer = 0;
+	soundData->bufferSize = 0;
+	soundData->wfex = {};
+}
+
+// 音声再生
+void SoundPlayWave(IXAudio2* xAudio2, const SoundData& soundData)
+{
+	HRESULT result;
+
+	// 波形フォーマットを元にSourceVoiceの生成
+	IXAudio2SourceVoice* pSourceVoice = nullptr;
+	result = xAudio2->CreateSourceVoice(&pSourceVoice, &soundData.wfex);
+	assert(SUCCEEDED(result));
+
+	// 再生する波形データの設定
+	XAUDIO2_BUFFER buf{};
+	buf.pAudioData = soundData.pBuffer;
+	buf.AudioBytes = soundData.bufferSize;
+	buf.Flags = XAUDIO2_END_OF_STREAM;
+
+	// 波形データの再生
+	result = pSourceVoice->SubmitSourceBuffer(&buf);
+	result = pSourceVoice->Start();
+}
 
 //パイプライン生成
 PipelineSet Pipeline3D(ID3D12Device* dev)
 {
 	HRESULT result;
-
-	ID3DBlob* vsBlob = nullptr; // オブジェクト頂点シェーダ
-	ID3DBlob* psBlob = nullptr; // ピクセルシェーダオブジェクト
-	ID3DBlob* errorBlob = nullptr; // エラーオブジェクト
+	ComPtr<ID3DBlob> vsBlob; // 頂点シェーダオブジェクト
+	ComPtr<ID3DBlob> psBlob; // ピクセルシェーダオブジェクト
+	ComPtr<ID3DBlob> errorBlob; // エラーオブジェクト
 
 	// 頂点シェーダの読み込みとコンパイル
 	result = D3DCompileFromFile(
-		L"Resources/shaders/BasicVS.hlsl",  // シェーダファイル名
+		L"Resources/shaders/BasicVS.hlsl", // シェーダファイル名
 		nullptr,
 		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
 		"main", "vs_5_0", // エントリーポイント名、シェーダーモデル指定
@@ -145,8 +295,6 @@ PipelineSet Pipeline3D(ID3D12Device* dev)
 		OutputDebugStringA(error.c_str());
 		assert(0);
 	}
-
-
 
 	// ピクセルシェーダの読み込みとコンパイル
 	result = D3DCompileFromFile(
@@ -173,21 +321,62 @@ PipelineSet Pipeline3D(ID3D12Device* dev)
 		assert(0);
 	}
 
-
 	// 頂点レイアウト
 	D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
 		{ // xyz座標(1行で書いたほうが見やすい)
-			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+			D3D12_APPEND_ALIGNED_ELEMENT,
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
 		},
-
-		{//法線ベクトル(1行ｓｗ書いたほうが見やすい)
-			"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0
+		{//法線ベクトル
+			"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,
+			D3D12_APPEND_ALIGNED_ELEMENT,
+		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0
 		},
 
 		{ // uv座標(1行で書いたほうが見やすい)
-			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,
+			D3D12_APPEND_ALIGNED_ELEMENT,
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
 		},
 	};
+
+	// デスクリプタレンジの設定
+	D3D12_DESCRIPTOR_RANGE descriptorRange{};
+	descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
+	descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
+	descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	// ルートパラメータの設定
+	D3D12_ROOT_PARAMETER rootParams[3] = {};
+	// 定数バッファ0番
+	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   // 種類
+	rootParams[0].Descriptor.ShaderRegister = 0;                   // 定数バッファ番号
+	rootParams[0].Descriptor.RegisterSpace = 0;                    // デフォルト値
+	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;  // 全てのシェーダから見える
+	// テクスチャレジスタ0番
+	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
+	rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
+	rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
+	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
+	// 定数バッファ1番
+	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   //種類
+	rootParams[2].Descriptor.ShaderRegister = 1;		  //デスクリプタレンジ
+	rootParams[2].Descriptor.RegisterSpace = 0;              		  //デスクリプタレンジ数
+	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;                // デフォルト値
+
+	// テクスチャサンプラーの設定
+	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
+	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
+	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
+	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
+	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
+	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
+	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
+	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
+	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
 
 	// グラフィックスパイプライン設定
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc{};
@@ -206,35 +395,19 @@ PipelineSet Pipeline3D(ID3D12Device* dev)
 	pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗りつぶし
 	pipelineDesc.RasterizerState.DepthClipEnable = true; // 深度クリッピングを有効に
 
-	// ブレンドステート
-	//pipelineDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;  // RBGA全てのチャンネルを描画
+	// レンダーターゲットのブレンド設定
 	D3D12_RENDER_TARGET_BLEND_DESC& blenddesc = pipelineDesc.BlendState.RenderTarget[0];
-	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-	blenddesc.BlendEnable = true;
-	blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-	blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-	blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL; // RBGA全てのチャンネルを描画
 
-	////加算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;			//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;			//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;			//デストの値を100%使う
+	//blenddesc.BlendEnable = true;                   // ブレンドを有効にする
+	//blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;    // 加算
+	//blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;      // ソースの値を100% 使う
+	//blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;    // デストの値を  0% 使う
 
-	////減算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;	//デストからソースを減算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;				//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;				//デストの値を100%使う
-	//
-	////色反転
-	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_INV_DEST_COLOR;	//1.0f-デストカラーの値
-	//blenddesc.DestBlend = D3D12_BLEND_ZERO;				//使わない
-
-	//半透明合成
-	blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;			//ソースのアルファ値
-	blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;	//1.0f-ソースのアルファ値
-
+	//// 半透明合成
+	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;             // 加算
+	//blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;         // ソースのアルファ値
+	//blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;    // 1.0f-ソースのアルファ値
 
 	// 頂点レイアウトの設定
 	pipelineDesc.InputLayout.pInputElementDescs = inputLayout;
@@ -248,82 +421,42 @@ PipelineSet Pipeline3D(ID3D12Device* dev)
 	pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 0～255指定のRGBA
 	pipelineDesc.SampleDesc.Count = 1; // 1ピクセルにつき1回サンプリング
 
-	// デスクリプタレンジの設定
-	D3D12_DESCRIPTOR_RANGE descriptorRange{};
-	descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
-	descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
-	descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-	// テクスチャサンプラーの設定
-	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
-	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
-	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
-	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
-	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
-	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
-	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
-	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
-	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
-
-	// ルートパラメータの設定
-	CD3DX12_ROOT_PARAMETER rootParams[3] = {};
-	rootParams[0].InitAsConstantBufferView(0);
-	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[0].Descriptor.ShaderRegister = 0;                    // 定数バッファ番号
-	rootParams[0].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-	// テクスチャレジスタ0番
-	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
-	rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
-	rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
-	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
-	//定数バッファ1番
-	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[2].Descriptor.ShaderRegister = 1;                    // 定数バッファ番号
-	rootParams[2].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-
-
+	//デプスステンシルステートの設定
+	pipelineDesc.DepthStencilState.DepthEnable = true;
+	pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+	pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
 	// ルートシグネチャ
-	ComPtr<ID3D12RootSignature> rootSignature;
+	//ComPtr<ID3D12RootSignature> rootSignature;
 	// ルートシグネチャの設定
 	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
 	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 	rootSignatureDesc.pParameters = rootParams; //ルートパラメータの先頭アドレス
 	rootSignatureDesc.NumParameters = _countof(rootParams);        //ルートパラメータ数
+
 	rootSignatureDesc.pStaticSamplers = &samplerDesc;
 	rootSignatureDesc.NumStaticSamplers = 1;
 
-
-
-	//パイプラインとルートシグネチャのセット
+	//パイプラインと√シグネチャのセット
 	PipelineSet pipelineSet;
 
 	// ルートシグネチャのシリアライズ
-	ComPtr<ID3DBlob> rootSigBlob = nullptr;
-	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
+	ComPtr<ID3DBlob> rootSigBlob;
+	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0,
+		&rootSigBlob, &errorBlob);
 	assert(SUCCEEDED(result));
-
-	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&pipelineSet.rootsignature));
+	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(),
+		IID_PPV_ARGS(&pipelineSet.rootsignature));
 	assert(SUCCEEDED(result));
-
 
 	// パイプラインにルートシグネチャをセット
 	pipelineDesc.pRootSignature = pipelineSet.rootsignature.Get();
 
-	//デスステンシルステートの設定
-	pipelineDesc.DepthStencilState.DepthEnable = true;//深度テストを行う
-	pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//書き込み許可
-	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;//小さければ合格
-	pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;//深度値フォーマット
-
-	// パイプラインステートの生成
-	ComPtr<ID3D12PipelineState> pipelineState = nullptr;
+	// パイプランステートの生成
 	result = dev->CreateGraphicsPipelineState(&pipelineDesc, IID_PPV_ARGS(&pipelineSet.pipelinestate));
 	assert(SUCCEEDED(result));
+
 
 	//パイプラインとルートシグネチャを返す
 	return pipelineSet;
@@ -332,14 +465,13 @@ PipelineSet Pipeline3D(ID3D12Device* dev)
 PipelineSet PipelineSprite(ID3D12Device* dev)
 {
 	HRESULT result;
-
 	ComPtr<ID3DBlob> vsBlob; // 頂点シェーダオブジェクト
 	ComPtr<ID3DBlob> psBlob; // ピクセルシェーダオブジェクト
 	ComPtr<ID3DBlob> errorBlob; // エラーオブジェクト
 
 	// 頂点シェーダの読み込みとコンパイル
 	result = D3DCompileFromFile(
-		L"Resources/shaders/SpriteVS.hlsl",  // シェーダファイル名
+		L"Resources/shaders/SpriteVS.hlsl", // シェーダファイル名
 		nullptr,
 		D3D_COMPILE_STANDARD_FILE_INCLUDE, // インクルード可能にする
 		"main", "vs_5_0", // エントリーポイント名、シェーダーモデル指定
@@ -361,8 +493,6 @@ PipelineSet PipelineSprite(ID3D12Device* dev)
 		OutputDebugStringA(error.c_str());
 		assert(0);
 	}
-
-
 
 	// ピクセルシェーダの読み込みとコンパイル
 	result = D3DCompileFromFile(
@@ -389,17 +519,65 @@ PipelineSet PipelineSprite(ID3D12Device* dev)
 		assert(0);
 	}
 
-
 	// 頂点レイアウト
 	D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
 		{ // xyz座標(1行で書いたほうが見やすい)
-			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+			"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
+			D3D12_APPEND_ALIGNED_ELEMENT,
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
 		},
 
 		{ // uv座標(1行で書いたほうが見やすい)
-			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
+			"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0,
+			D3D12_APPEND_ALIGNED_ELEMENT,
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0
 		},
 	};
+
+
+
+
+	// デスクリプタレンジの設定
+	CD3DX12_DESCRIPTOR_RANGE descriptorRange{};
+	descriptorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+	//descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
+	//descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	//descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
+	//descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	//// ルートパラメータの設定
+	//D3D12_ROOT_PARAMETER rootParams[3] = {};
+	//// 定数バッファ0番
+	//rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   // 種類
+	//rootParams[0].Descriptor.ShaderRegister = 0;                   // 定数バッファ番号
+	//rootParams[0].Descriptor.RegisterSpace = 0;                    // デフォルト値
+	//rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;  // 全てのシェーダから見える
+	//// テクスチャレジスタ0番
+	//rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
+	//rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
+	//rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
+	//rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
+	//// 定数バッファ1番
+	//rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   //種類
+	//rootParams[2].Descriptor.ShaderRegister = 1;		  //デスクリプタレンジ
+	//rootParams[2].Descriptor.RegisterSpace = 0;              		  //デスクリプタレンジ数
+	//rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;                // デフォルト値
+
+	CD3DX12_ROOT_PARAMETER rootParams[2];
+	rootParams[0].InitAsConstantBufferView(0);
+	rootParams[1].InitAsDescriptorTable(1, &descriptorRange, D3D12_SHADER_VISIBILITY_ALL);
+
+	// テクスチャサンプラーの設定
+	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
+	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
+	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
+	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
+	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
+	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
+	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
+	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
+	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
 
 	// グラフィックスパイプライン設定
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc{};
@@ -415,41 +593,23 @@ PipelineSet PipelineSprite(ID3D12Device* dev)
 
 	// ラスタライザの設定
 	pipelineDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // 背面カリングしない
-	pipelineDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗り
-	pipelineDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	pipelineDesc.RasterizerState.DepthClipEnable = false; // 深度クリッピングを有効に
+	pipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // カリングしない
+	//pipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; // ポリゴン内塗りつぶし
+	//pipelineDesc.RasterizerState.DepthClipEnable = true; // 深度クリッピングを有効に
 
-	// ブレンドステート
-	//pipelineDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;  // RBGA全てのチャンネルを描画
+	// レンダーターゲットのブレンド設定
 	D3D12_RENDER_TARGET_BLEND_DESC& blenddesc = pipelineDesc.BlendState.RenderTarget[0];
-	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-	blenddesc.BlendEnable = true;
-	blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-	blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-	blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	blenddesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL; // RBGA全てのチャンネルを描画
 
-	////加算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;			//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;			//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;			//デストの値を100%使う
+	//blenddesc.BlendEnable = true;                   // ブレンドを有効にする
+	//blenddesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;    // 加算
+	//blenddesc.SrcBlendAlpha = D3D12_BLEND_ONE;      // ソースの値を100% 使う
+	//blenddesc.DestBlendAlpha = D3D12_BLEND_ZERO;    // デストの値を  0% 使う
 
-	////減算合成
-	//blenddesc.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;	//デストからソースを減算
-	//blenddesc.SrcBlend = D3D12_BLEND_ONE;				//ソースの値を100%使う
-	//blenddesc.DestBlend = D3D12_BLEND_ONE;				//デストの値を100%使う
-	//
-	////色反転
-	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	//blenddesc.SrcBlend = D3D12_BLEND_INV_DEST_COLOR;	//1.0f-デストカラーの値
-	//blenddesc.DestBlend = D3D12_BLEND_ZERO;				//使わない
-
-	//半透明合成
-	blenddesc.BlendOp = D3D12_BLEND_OP_ADD;				//加算
-	blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;			//ソースのアルファ値
-	blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;	//1.0f-ソースのアルファ値
-
+	//// 半透明合成
+	//blenddesc.BlendOp = D3D12_BLEND_OP_ADD;             // 加算
+	//blenddesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;         // ソースのアルファ値
+	//blenddesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;    // 1.0f-ソースのアルファ値
 
 	// 頂点レイアウトの設定
 	pipelineDesc.InputLayout.pInputElementDescs = inputLayout;
@@ -463,92 +623,54 @@ PipelineSet PipelineSprite(ID3D12Device* dev)
 	pipelineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; // 0～255指定のRGBA
 	pipelineDesc.SampleDesc.Count = 1; // 1ピクセルにつき1回サンプリング
 
-	// デスクリプタレンジの設定
-	D3D12_DESCRIPTOR_RANGE descriptorRange{};
-	descriptorRange.NumDescriptors = 1;         //一度の描画に使うテクスチャが1枚なので1
-	descriptorRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	descriptorRange.BaseShaderRegister = 0;     //テクスチャレジスタ0番
-	descriptorRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+	//デプスステンシルステートの設定
+	pipelineDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS; // 常に上書きルール
 
-	// テクスチャサンプラーの設定
-	D3D12_STATIC_SAMPLER_DESC samplerDesc{};
-	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //横繰り返し（タイリング）
-	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //縦繰り返し（タイリング）
-	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;                 //奥行繰り返し（タイリング）
-	samplerDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;  //ボーダーの時は黒
-	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;                   //全てリニア補間
-	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;                                 //ミップマップ最大値
-	samplerDesc.MinLOD = 0.0f;                                              //ミップマップ最小値
-	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	samplerDesc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;           //ピクセルシェーダからのみ使用可能
-
-	// ルートパラメータの設定
-	CD3DX12_ROOT_PARAMETER rootParams[3] = {};
-	rootParams[0].InitAsConstantBufferView(0);
-	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[0].Descriptor.ShaderRegister = 0;                    // 定数バッファ番号
-	rootParams[0].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-	// テクスチャレジスタ0番
-	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;   //種類
-	rootParams[1].DescriptorTable.pDescriptorRanges = &descriptorRange;		  //デスクリプタレンジ
-	rootParams[1].DescriptorTable.NumDescriptorRanges = 1;              		  //デスクリプタレンジ数
-	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;               //全てのシェーダから見える
-	//定数バッファ1番
-	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    // 定数バッファビュー
-	rootParams[2].Descriptor.ShaderRegister = 1;                    // 定数バッファ番号
-	rootParams[2].Descriptor.RegisterSpace = 0;                     // デフォルト値
-	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   //全てのシェーダから見える
-
-
+	pipelineDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	pipelineDesc.DepthStencilState.DepthEnable = false;
+	//pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	//pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	//pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
 	// ルートシグネチャ
-	ComPtr<ID3D12RootSignature> rootSignature;
+	//ComPtr<ID3D12RootSignature> rootSignature;
 	// ルートシグネチャの設定
 	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
 	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 	rootSignatureDesc.pParameters = rootParams; //ルートパラメータの先頭アドレス
 	rootSignatureDesc.NumParameters = _countof(rootParams);        //ルートパラメータ数
+
 	rootSignatureDesc.pStaticSamplers = &samplerDesc;
 	rootSignatureDesc.NumStaticSamplers = 1;
 
-
-
-	//パイプラインとルートシグネチャのセット
+	//パイプラインと√シグネチャのセット
 	PipelineSet pipelineSet;
 
 	// ルートシグネチャのシリアライズ
-	ComPtr<ID3DBlob> rootSigBlob = nullptr;
-	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
+	ComPtr<ID3DBlob> rootSigBlob;
+	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0,
+		&rootSigBlob, &errorBlob);
 	assert(SUCCEEDED(result));
-
-	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&pipelineSet.rootsignature));
+	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(),
+		IID_PPV_ARGS(&pipelineSet.rootsignature));
 	assert(SUCCEEDED(result));
-
 
 	// パイプラインにルートシグネチャをセット
 	pipelineDesc.pRootSignature = pipelineSet.rootsignature.Get();
 
-	//デスステンシルステートの設定
-	pipelineDesc.DepthStencilState.DepthEnable = true;//深度テストを行う
-	pipelineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//書き込み許可
-	pipelineDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;//小さければ合格
-	pipelineDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;//深度値フォーマット
-
-	// パイプラインステートの生成
-	ComPtr<ID3D12PipelineState> pipelineState = nullptr;
+	// パイプランステートの生成
 	result = dev->CreateGraphicsPipelineState(&pipelineDesc, IID_PPV_ARGS(&pipelineSet.pipelinestate));
 	assert(SUCCEEDED(result));
+
 
 	//パイプラインとルートシグネチャを返す
 	return pipelineSet;
 }
 
-SpriteCommon SpriteCommonCreate(ID3D12Device* dev, int window_width, int windowheight)
+SpriteCommon SpriteCommonCreate(ID3D12Device* dev, int window_width, int window_height)
 {
 	HRESULT result = S_FALSE;
-
-
 
 	//新たなスプライト共通データを生成
 	SpriteCommon spriteCommon{};
@@ -556,9 +678,10 @@ SpriteCommon SpriteCommonCreate(ID3D12Device* dev, int window_width, int windowh
 	//スプライト用パイプライン生成
 	spriteCommon.pipelineSet = PipelineSprite(dev);
 
-	//平行投影の射影行列生成
-	spriteCommon.matProjection = XMMatrixOrthographicOffCenterLH(
-		0.0f, (float)window_width, (float)window_height, 0.0f, 0.0f, 1.0f);
+	//平行投影行列生成
+	spriteCommon.matProjection = XMMatrixOrthographicOffCenterLH(0.0f, (float)window_width, (float)window_height, 0.0f, 0.0f, 1.0f);
+
+	//HRESULT result = S_FALSE;
 
 	//デスクリプタヒープを生成
 	D3D12_DESCRIPTOR_HEAP_DESC descHeapDesc = {};
@@ -569,16 +692,55 @@ SpriteCommon SpriteCommonCreate(ID3D12Device* dev, int window_width, int windowh
 
 	return spriteCommon;
 
+}
 
+//スプライト単体描画
+void SpriteDraw(const Sprite& sprite, ID3D12GraphicsCommandList* cmdList, const SpriteCommon& spriteCommon, ID3D12Device* dev)
+{
+	// 頂点バッファの設定コマンド
+	cmdList->IASetVertexBuffers(0, 1, &sprite.vbView);
+
+	// 定数バッファ(CBV)の設定コマンド
+	cmdList->SetGraphicsRootConstantBufferView(0, sprite.constBuff->GetGPUVirtualAddress());
+
+	//シェーダーリソースビューをセット
+	cmdList->SetGraphicsRootDescriptorTable(1, CD3DX12_GPU_DESCRIPTOR_HANDLE(spriteCommon.descHeap->GetGPUDescriptorHandleForHeapStart(),
+		sprite.texNumber, dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)));
+
+	//ポリゴンの描画
+	cmdList->DrawInstanced(4, 1, 0, 0);
 
 }
 
+//スプライト単体描画バッファの転送
+void SpriteTransferVertexBuffer(const Sprite& sprite) {
+	HRESULT result = S_FALSE;
 
+	//頂点データ
+	VertexPosUv vertices[] = {
+		{{},{0.0f,1.0f}},
+		{{},{0.0f,0.0f}},
+		{{},{1.0f,1.0f}},
+		{{},{1.0f,0.0f}},
+	};
+
+	enum { LB, LT, RB, RT };
+
+	vertices[LB].pos = { 0.0f,sprite.size.y,0.0f };
+	vertices[LT].pos = { 0.0f,0.0f,0.0f };
+	vertices[RB].pos = { sprite.size.x,sprite.size.y,0.0f };
+	vertices[RT].pos = { sprite.size.x,0.0f,0.0f };
+
+	VertexPosUv* vertMap = nullptr;
+	result = sprite.vertBuff->Map(0, nullptr, (void**)&vertMap);
+	memcpy(vertMap, vertices, sizeof(vertices));
+	sprite.vertBuff->Unmap(0, nullptr);
+}
 
 //スプライト生成
-Sprite SpriteCreate(ID3D12Device* dev, int windou_width, int window_height)
+Sprite SpriteCreate(ID3D12Device* dev, int windou_width, int window_height, UINT texNumber, const SpriteCommon& spriteCommon)
 {
-	HRESULT result=S_FALSE;
+	HRESULT result = S_FALSE;
 
 	//新しいスプライトを作る
 	Sprite sprite{};
@@ -592,18 +754,31 @@ Sprite SpriteCreate(ID3D12Device* dev, int windou_width, int window_height)
 	};
 
 	// ヒーププロパティ
-	CD3DX12_HEAP_PROPERTIES heapVertexBuffer = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	CD3DX12_HEAP_PROPERTIES heapPropsVertexBuffer = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
 	// リソース設定
-	CD3DX12_RESOURCE_DESC resourceVertexBuffer = CD3DX12_RESOURCE_DESC::Buffer(sizeof(vertices));
+	CD3DX12_RESOURCE_DESC resourceDescVertexBuffer = CD3DX12_RESOURCE_DESC::Buffer(sizeof(VertexPosUv));
+
+	//テクスチャ番号をコピー
+	sprite.texNumber = texNumber;
 
 	//頂点バッファ生成
 	result = dev->CreateCommittedResource(
-		&heapVertexBuffer, // ヒープ設定
+		&heapPropsVertexBuffer, // ヒープ設定
 		D3D12_HEAP_FLAG_NONE,
-		&resourceVertexBuffer, // リソース設定
+		&resourceDescVertexBuffer, // リソース設定
 		D3D12_RESOURCE_STATE_GENERIC_READ,
 		nullptr,
 		IID_PPV_ARGS(&sprite.vertBuff));
+	assert(SUCCEEDED(result));
+
+	if (spriteCommon.texBuff[sprite.texNumber]) {
+		//テクスチャ情報取得
+		D3D12_RESOURCE_DESC resDesc = spriteCommon.texBuff[sprite.texNumber]->GetDesc();
+		//スプライトの大きさを画像の解像度に合わせる
+		sprite.size = { (float)resDesc.Width,(float)resDesc.Height };
+	}
+	//頂点バッファデータ転送
+	SpriteTransferVertexBuffer(sprite);
 
 	//頂点バッファへのデータ転送
 	VertexPosUv* vertMap = nullptr;
@@ -620,15 +795,15 @@ Sprite SpriteCreate(ID3D12Device* dev, int windou_width, int window_height)
 	sprite.vbView.StrideInBytes = sizeof(vertices[0]);
 
 	// ヒーププロパティ
-	CD3DX12_HEAP_PROPERTIES heapConstantBuffer = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	CD3DX12_HEAP_PROPERTIES heapPropsConstantBuffer = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
 	// リソース設定
-	CD3DX12_RESOURCE_DESC resourceConstantBuffer = CD3DX12_RESOURCE_DESC::Buffer((sizeof(ConstBufferData) + 0xff) & ~0xff);
+	CD3DX12_RESOURCE_DESC resourceDescConstantBuffer = CD3DX12_RESOURCE_DESC::Buffer((sizeof(ConstBufferData) + 0xff) & ~0xff);
 
 	// 定数バッファの生成
 	result = dev->CreateCommittedResource(
-		&heapConstantBuffer, // ヒープ設定
+		&heapPropsConstantBuffer, // ヒープ設定
 		D3D12_HEAP_FLAG_NONE,
-		&resourceConstantBuffer, // リソース設定
+		&resourceDescConstantBuffer, // リソース設定
 		D3D12_RESOURCE_STATE_GENERIC_READ,
 		nullptr,
 		IID_PPV_ARGS(&sprite.constBuff));
@@ -650,18 +825,17 @@ Sprite SpriteCreate(ID3D12Device* dev, int windou_width, int window_height)
 //スプライト単体更新
 void SpriteUpdate(Sprite& sprite, const SpriteCommon& spriteCommon)
 {
-	//ワールド行列の更新
 	sprite.matWorld = XMMatrixIdentity();
-	//Z軸回転
+
 	sprite.matWorld *= XMMatrixRotationZ(XMConvertToRadians(sprite.rotation));
-	//平行移動
+
 	sprite.matWorld *= XMMatrixTranslation(sprite.position.x, sprite.position.y, sprite.position.z);
 
-	//定数バッファの転送
+
+	// 定数バッファにデータ転送
 	ConstBufferData* constMap = nullptr;
-	HRESULT result = sprite.constBuff->Map(0, nullptr, (void**)&constMap);
+	HRESULT result = sprite.constBuff->Map(0, nullptr, (void**)&constMap); // マッピング
 	constMap->mat = sprite.matWorld * spriteCommon.matProjection;
-	constMap->color = sprite.color;
 	sprite.constBuff->Unmap(0, nullptr);
 
 }
@@ -669,55 +843,32 @@ void SpriteUpdate(Sprite& sprite, const SpriteCommon& spriteCommon)
 //スプライト共通グラフィックコマンドのセット
 void SpriteCommonBeginDraw(const SpriteCommon& spritecommon, ID3D12GraphicsCommandList* cmdList)
 {
-	//パイプラインステートの設定
+	// パイプラインステートとルートシグネチャの設定コマンド
 	cmdList->SetPipelineState(spritecommon.pipelineSet.pipelinestate.Get());
-	//ルートシグネチャの設定
 	cmdList->SetGraphicsRootSignature(spritecommon.pipelineSet.rootsignature.Get());
-	//プリミティブ形状を設定
-	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
-	//テクスチャ用デスクリプタヒープの設定
+	// プリミティブ形状の設定コマンド
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP); // 三角形リスト
+
+	//テクスチャ用でスクリプタヒープの設定
 	ID3D12DescriptorHeap* ppHeaps[] = { spritecommon.descHeap.Get() };
 	cmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 }
 
-//スプライト単体描画
-void SpriteDraw(const Sprite& sprite, ID3D12GraphicsCommandList* cmdList, const SpriteCommon& spriteCommon, ID3D12Device* dev)
-{
-	//頂点バッファをセット
-	cmdList->IASetVertexBuffers(0, 1, &sprite.vbView);
 
-	//定数バッファをセット
-	cmdList->SetGraphicsRootConstantBufferView(0, sprite.constBuff->GetGPUVirtualAddress());
-
-	//シェーダリソースビューをセット
-	cmdList->SetGraphicsRootDescriptorTable(1,
-		CD3DX12_GPU_DESCRIPTOR_HANDLE(
-			spriteCommon.descHeap->GetGPUDescriptorHandleForHeapStart(),
-			sprite.texNumber,
-			dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
-		)
-	);
-
-	//ポリゴンの描画(4頂点で四角形)
-	cmdList->DrawInstanced(4, 1, 0, 0);
-
-}
 
 //スプライト共通テクスチャ読み込み
-void SpriteCommonLoatTexture(SpriteCommon& spriteCommon, UINT texnumber, const wchar_t* filename, ID3D12Device* dev) {
-	//異常な番号の指定を検出
+void SpriteCommonLoadTexture(SpriteCommon& spriteCommon, UINT texnumber, const wchar_t* filename, ID3D12Device* dev) {
+
 	assert(texnumber <= spriteSRVCount - 1);
 
 	HRESULT result;
-
-	// WICテクスチャのロード
 	TexMetadata metadata{};
 	ScratchImage scratchImg{};
-	result = LoadFromWICFile(
-		filename,	//ファイル
-		WIC_FLAGS_NONE,
-		&metadata, scratchImg);
+
+	// WICテクスチャのロード
+	result = LoadFromWICFile(filename, WIC_FLAGS_NONE, &metadata, scratchImg);
+	assert(SUCCEEDED(result));
 
 	ScratchImage mipChain{};
 	// ミップマップ生成
@@ -732,36 +883,25 @@ void SpriteCommonLoatTexture(SpriteCommon& spriteCommon, UINT texnumber, const w
 	// 読み込んだディフューズテクスチャをSRGBとして扱う
 	metadata.format = MakeSRGB(metadata.format);
 
-	// ヒープ設定
-	D3D12_HEAP_PROPERTIES textureHeapProp{};
-	textureHeapProp.Type = D3D12_HEAP_TYPE_CUSTOM;
-	textureHeapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
-	textureHeapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
 	// リソース設定
-	D3D12_RESOURCE_DESC textureResourceDesc{};
-	textureResourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	textureResourceDesc.Format = metadata.format;
-	textureResourceDesc.Width = metadata.width;
-	textureResourceDesc.Height = (UINT)metadata.height;
-	textureResourceDesc.DepthOrArraySize = (UINT16)metadata.arraySize;
-	textureResourceDesc.MipLevels = (UINT16)metadata.mipLevels;
-	textureResourceDesc.SampleDesc.Count = 1;
+	CD3DX12_RESOURCE_DESC texresDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+		metadata.format, metadata.width, (UINT)metadata.height, (UINT16)metadata.arraySize,
+		(UINT16)metadata.mipLevels);
 
-
+	// ヒーププロパティ
+	CD3DX12_HEAP_PROPERTIES heapProps =
+		CD3DX12_HEAP_PROPERTIES(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_L0);
 
 	// テクスチャ用バッファの生成
 	result = dev->CreateCommittedResource(
-		&textureHeapProp,
-		D3D12_HEAP_FLAG_NONE,
-		&textureResourceDesc,
+		&heapProps, D3D12_HEAP_FLAG_NONE, &texresDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, // テクスチャ用指定
 		nullptr, IID_PPV_ARGS(&spriteCommon.texBuff[texnumber]));
+	assert(SUCCEEDED(result));
 
-	// 全ミップマップについて
+	// テクスチャバッファにデータ転送
 	for (size_t i = 0; i < metadata.mipLevels; i++) {
-		// ミップマップレベルを指定してイメージを取得
-		const Image* img = scratchImg.GetImage(i, 0, 0);
-		// テクスチャバッファにデータ転送
+		const Image* img = scratchImg.GetImage(i, 0, 0); // 生データ抽出
 		result = spriteCommon.texBuff[texnumber]->WriteToSubresource(
 			(UINT)i,
 			nullptr,              // 全領域へコピー
@@ -769,55 +909,26 @@ void SpriteCommonLoatTexture(SpriteCommon& spriteCommon, UINT texnumber, const w
 			(UINT)img->rowPitch,  // 1ラインサイズ
 			(UINT)img->slicePitch // 1枚サイズ
 		);
+		assert(SUCCEEDED(result));
 	}
 
-	// シェーダリソースビュー設定
-	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-	srvDesc.Format = textureResourceDesc.Format;
+	// シェーダリソースビュー作成
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{}; // 設定構造体
+	D3D12_RESOURCE_DESC resDesc = spriteCommon.texBuff[texnumber]->GetDesc();
+
+	srvDesc.Format = resDesc.Format;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	srvDesc.Texture2D.MipLevels = textureResourceDesc.MipLevels;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;//2Dテクスチャ
+	srvDesc.Texture2D.MipLevels = 1;
 
-
-	// ハンドルの指す位置にシェーダーリソースビュー作成
-	dev->CreateShaderResourceView(
-		spriteCommon.texBuff[texnumber].Get(),
-		&srvDesc,
-		CD3DX12_CPU_DESCRIPTOR_HANDLE(spriteCommon.descHeap->GetCPUDescriptorHandleForHeapStart(),
-			texnumber,
-			dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
+	dev->CreateShaderResourceView(spriteCommon.texBuff[texnumber].Get(), //ビューと関連付けるバッファ
+		&srvDesc, //テクスチャ設定情報
+		CD3DX12_CPU_DESCRIPTOR_HANDLE(spriteCommon.descHeap->GetCPUDescriptorHandleForHeapStart(), texnumber, dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
 	);
+
 	//return S_OK;
 }
 
-//スプライト単体描画バッファの転送
-void SpriteTransferVertexBuffer(const Sprite& sprite) {
-	HRESULT result = S_FALSE;
-
-	//頂点データ
-	VertexPosUv vertices[] = {
-		{{},{0.0f,1.0f}},	//左下
-		{{},{0.0f,0.0f}},	//左上
-		{{},{1.0f,1.0f}},	//右下
-		{{},{1.0f,0.0f}},	//右上
-	};
-
-	//左下、左上、右下、右上
-	enum { LB, LT, RB, RT };
-
-	vertices[LB].pos = { 0.0f,sprite.size.y,0.0f };//左下
-	vertices[LT].pos = { 0.0f,0.0f,0.0f };
-	vertices[RB].pos = { sprite.size.x,sprite.size.y,0.0f };
-	vertices[RT].pos = { sprite.size.x,0.0f,0.0f };
-
-	//頂点バッファへのデータ転送
-	VertexPosUv* vertMap = nullptr;
-	result = sprite.vertBuff->Map(0, nullptr, (void**)&vertMap);
-	memcpy(vertMap, vertices, sizeof(vertices));
-	sprite.vertBuff->Unmap(0, nullptr);
-
-
-}
 
 
 //3Dオブジェクトの初期化
@@ -935,38 +1046,38 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 
 
-	//ウィンドウクラスの設定
-	WNDCLASSEX w{};
-	w.cbSize = sizeof(WNDCLASSEX);
-	w.lpfnWndProc = (WNDPROC)WindowProc;	//ウィンドウプロシージャを設定
-	w.lpszClassName = L"DirectXGame";	//ウィンドウクラス名
-	w.hInstance = GetModuleHandle(nullptr);	//ウィンドウハンドル
-	w.hCursor = LoadCursor(NULL, IDC_ARROW);	//カーソル指定
+	////ウィンドウクラスの設定
+	//WNDCLASSEX w{};
+	//w.cbSize = sizeof(WNDCLASSEX);
+	//w.lpfnWndProc = (WNDPROC)WindowProc;	//ウィンドウプロシージャを設定
+	//w.lpszClassName = L"DirectXGame";	//ウィンドウクラス名
+	//w.hInstance = GetModuleHandle(nullptr);	//ウィンドウハンドル
+	//w.hCursor = LoadCursor(NULL, IDC_ARROW);	//カーソル指定
 
-	//ウィンドウクラスを05に登録する
-	RegisterClassEx(&w);
-	//ウィンドウサイズ{ X座標 Y座標 横幅 縦幅 }
-	RECT wrc = { 0,0,window_width,window_height };
-	//自動でサイズを補正する
-	AdjustWindowRect(&wrc, WS_OVERLAPPEDWINDOW, false);
+	////ウィンドウクラスを05に登録する
+	//RegisterClassEx(&w);
+	////ウィンドウサイズ{ X座標 Y座標 横幅 縦幅 }
+	//RECT wrc = { 0,0,window_width,window_height };
+	////自動でサイズを補正する
+	//AdjustWindowRect(&wrc, WS_OVERLAPPEDWINDOW, false);
 
-	//ウィンドウオブジェクトの生成
-	HWND hwnd = CreateWindow(w.lpszClassName,	//クラス名
-		L"DirectXGame",							//タイトルバーの文字
-		WS_OVERLAPPEDWINDOW,					//標準的なウィンドウスタイル
-		CW_USEDEFAULT,							//表示X座標(OSに任せる)
-		CW_USEDEFAULT,							//表示Y座標(OSに任せる)
-		wrc.right - wrc.left,					//ウィンドウ横幅
-		wrc.bottom - wrc.top,					//ウィンドウ縦幅
-		nullptr,								//親ウィンドウハンドル
-		nullptr,								//メニューハンドル
-		w.hInstance,							//呼び出しアプリケーションハンドル
-		nullptr);								//オプション
+	////ウィンドウオブジェクトの生成
+	//HWND hwnd = CreateWindow(w.lpszClassName,	//クラス名
+	//	L"DirectXGame",							//タイトルバーの文字
+	//	WS_OVERLAPPEDWINDOW,					//標準的なウィンドウスタイル
+	//	CW_USEDEFAULT,							//表示X座標(OSに任せる)
+	//	CW_USEDEFAULT,							//表示Y座標(OSに任せる)
+	//	wrc.right - wrc.left,					//ウィンドウ横幅
+	//	wrc.bottom - wrc.top,					//ウィンドウ縦幅
+	//	nullptr,								//親ウィンドウハンドル
+	//	nullptr,								//メニューハンドル
+	//	w.hInstance,							//呼び出しアプリケーションハンドル
+	//	nullptr);								//オプション
 
-	//ウィンドウを表示状態にする
-	ShowWindow(hwnd, SW_SHOW);
+	////ウィンドウを表示状態にする
+	//ShowWindow(hwnd, SW_SHOW);
 
-	MSG msg{};	//メッセージ
+	//MSG msg{};	//メッセージ
 	//DirectX初期化処理 ここから
 
 #ifdef _DEBUG
@@ -977,6 +1088,11 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	}
 #endif
 
+	WinApp* winapp = nullptr;
+	winapp = new WinApp();
+	winapp->Initialize();
+
+
 	HRESULT result;
 	ComPtr<ID3D12Device> device = nullptr;
 	ComPtr<IDXGIFactory7> dxgiFactory = nullptr;
@@ -985,6 +1101,15 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	ComPtr<ID3D12GraphicsCommandList> commandList = nullptr;
 	ComPtr<ID3D12CommandQueue> commandQueue = nullptr;
 	ComPtr<ID3D12DescriptorHeap> rtvHeap = nullptr;
+
+	ComPtr<IXAudio2> xAudio2;
+	IXAudio2MasteringVoice* masterVoice;
+
+	// 音声読み込み
+	SoundData soundData1 = SoundLoadWave("Resources/BGM/digitalworld.wav");
+	/*SoundData soundData2 = SoundLoadWave("Resources/BGM/.wav");
+	SoundData soundData3 = SoundLoadWave("Resources/BGM/.wav");*/
+
 
 	// DXGIファクトリーの生成
 	result = CreateDXGIFactory(IID_PPV_ARGS(&dxgiFactory));
@@ -1070,7 +1195,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	// スワップチェーンの生成
 	result = dxgiFactory->CreateSwapChainForHwnd(
 		commandQueue.Get(),
-		hwnd,
+		winapp->GetHwnd(),
 		&swapChainDesc,
 		nullptr,
 		nullptr,
@@ -1165,27 +1290,35 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	UINT64 fenceVal = 0;
 	result = device->CreateFence(fenceVal, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
 
-	// DirectInputの初期化
-	IDirectInput8* directInput = nullptr;
-	result = DirectInput8Create(
-		w.hInstance, DIRECTINPUT_VERSION, IID_IDirectInput8, (void**)&directInput, nullptr);
-	assert(SUCCEEDED(result));
+	//入力
+	Input* input = nullptr;
+	input = new Input();
+	input->Initialize(winapp);
 
-	// キーボードデバイスの生成
-	IDirectInputDevice8* keyboard = nullptr;
-	result = directInput->CreateDevice(GUID_SysKeyboard, &keyboard, NULL);
-	assert(SUCCEEDED(result));
+	//// DirectInputの初期化
+	//IDirectInput8* directInput = nullptr;
+	//result = DirectInput8Create(
+	//	w.hInstance, DIRECTINPUT_VERSION, IID_IDirectInput8, (void**)&directInput, nullptr);
+	//assert(SUCCEEDED(result));
 
-	// 入力データ形式のセット
-	result = keyboard->SetDataFormat(&c_dfDIKeyboard); // 標準形式
-	assert(SUCCEEDED(result));
+	//// キーボードデバイスの生成
+	//IDirectInputDevice8* keyboard = nullptr;
+	//result = directInput->CreateDevice(GUID_SysKeyboard, &keyboard, NULL);
+	//assert(SUCCEEDED(result));
 
-	// 排他制御レベルのセット
-	result = keyboard->SetCooperativeLevel(
-		hwnd, DISCL_FOREGROUND | DISCL_NONEXCLUSIVE | DISCL_NOWINKEY);
-	assert(SUCCEEDED(result));
+	//// 入力データ形式のセット
+	//result = keyboard->SetDataFormat(&c_dfDIKeyboard); // 標準形式
+	//assert(SUCCEEDED(result));
 
+	//// 排他制御レベルのセット
+	//result = keyboard->SetCooperativeLevel(
+	//	hwnd, DISCL_FOREGROUND | DISCL_NONEXCLUSIVE | DISCL_NOWINKEY);
+	//assert(SUCCEEDED(result));
 
+	// xaudioエンジンのインスタンスを生成
+	result = XAudio2Create(&xAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
+	// マスターボイスを生成
+	result = xAudio2->CreateMasteringVoice(&masterVoice);
 
 
 	//DirectX初期化処理 ここまで
@@ -1201,23 +1334,198 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	spritecommon = SpriteCommonCreate(device.Get(), window_width, window_height);
 
 	//スプライト共通テクスチャ読み込み
-	SpriteCommonLoatTexture(spritecommon, 0, L"mario.jpg", device.Get());
-	SpriteCommonLoatTexture(spritecommon, 1, L"reimu.png", device.Get());
+	SpriteCommonLoadTexture(spritecommon, 0, L"Resources/titlescreen.png", device.Get());	//タイトル文字
+	SpriteCommonLoadTexture(spritecommon, 1, L"Resources/pushSpace.png", device.Get());		//pushspaceの文字
 
+	//数字
+	SpriteCommonLoadTexture(spritecommon, 2, L"Resources/number1.png", device.Get());		//1
+	SpriteCommonLoadTexture(spritecommon, 3, L"Resources/number2.png", device.Get());		//2
+	SpriteCommonLoadTexture(spritecommon, 4, L"Resources/number3.png", device.Get());		//3
+	SpriteCommonLoadTexture(spritecommon, 5, L"Resources/number4.png", device.Get());		//4
+	SpriteCommonLoadTexture(spritecommon, 6, L"Resources/number5.png", device.Get());		//5
+
+	//背景
+	SpriteCommonLoadTexture(spritecommon, 7, L"Resources/background.png", device.Get());
+	//ステージ選択
+	SpriteCommonLoadTexture(spritecommon, 8, L"Resources/stageselect.png", device.Get());		//ステージセレクトの文字
+	//選択矢印
+	SpriteCommonLoadTexture(spritecommon, 9, L"Resources/arrow.png", device.Get());			//矢印
+	//操作説明
+	SpriteCommonLoadTexture(spritecommon, 10, L"Resources/tutorial.png", device.Get());			//操作説明
+	//ゲームオーバー
+	SpriteCommonLoadTexture(spritecommon, 11, L"Resources/gameover.png", device.Get());		//ゲームオーバーの文字
+	SpriteCommonLoadTexture(spritecommon, 12, L"Resources/restart.png", device.Get());		//リスタート
+	//ステージクリア
+	SpriteCommonLoadTexture(spritecommon, 13, L"Resources/stage_clear.png", device.Get());
 	//スプライト
-	const int spriteMax = 2;
-	Sprite sprite[spriteMax];
+	Sprite titleSprite;			//タイトル
+	Sprite pushSpaceSprite;		//pushspace
+	Sprite numberSprite[5];		//数字
+	Sprite backGroundSprite;	//背景
+	Sprite stageSelectSprite;	//ステージセレクト
+	Sprite arrowSprite;			//矢印
+	Sprite tutorialSprite;		//操作説明
+	Sprite gameoverSprite;		//ゲームオーバー
+	Sprite restartSprite;		//リスタート
+	Sprite stageClearSprite;	//ステージクリア
 
-	//スプライトの生成
-	sprite[0] = SpriteCreate(device.Get(), window_width, window_height);
-	//スプライトに何番のテクスチャを使うか
-	sprite[0].texNumber = 0;
-	//スプライトに何番のテクスチャを使うか
-	sprite[1].texNumber = 1;
-	//スプライトの生成
-	sprite[1] = SpriteCreate(device.Get(), window_width, window_height);
+	//タイトル
 
-	sprite[1].position.x = 100.0;
+	//スプライトに何番のテクスチャを使うか
+	titleSprite.texNumber = 0;
+	//スプライトの生成
+	titleSprite = SpriteCreate(device.Get(), window_width, window_height, titleSprite.texNumber, spritecommon);
+	//サイズ
+	titleSprite.size = { window_width,window_height };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(titleSprite);
+
+	//pushspace
+	//スプライトに何番のテクスチャを使うか
+	pushSpaceSprite.texNumber = 1;
+	//スプライトの生成
+	pushSpaceSprite = SpriteCreate(device.Get(), window_width, window_height, pushSpaceSprite.texNumber, spritecommon);
+	//サイズ
+	pushSpaceSprite.size = { 690,65 };
+	//位置
+	pushSpaceSprite.position = { window_width / 4,window_height - window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(pushSpaceSprite);
+
+	//数字
+	for (int i = 0; i < 5; i++) {
+		numberSprite[i].texNumber = i + 2;
+		numberSprite[i] = SpriteCreate(device.Get(), window_width, window_height, numberSprite[i].texNumber, spritecommon);
+		numberSprite[i].size = { 128,128 };
+		numberSprite[i].position = { (window_width / 4 - 200) + (float)i * 250,window_height - window_height / 4 ,0 };
+		//頂点バッファに反映
+		SpriteTransferVertexBuffer(numberSprite[i]);
+	}
+
+	//背景
+	//スプライトに何番のテクスチャを使うか
+	backGroundSprite.texNumber = 7;
+	//スプライトの生成
+	backGroundSprite = SpriteCreate(device.Get(), window_width, window_height, backGroundSprite.texNumber, spritecommon);
+	//サイズ
+	backGroundSprite.size = { window_width,window_height };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(backGroundSprite);
+
+	//ステージ選択
+	//スプライトに何番のテクスチャを使うか
+	stageSelectSprite.texNumber = 8;
+	//スプライトの生成
+	stageSelectSprite = SpriteCreate(device.Get(), window_width, window_height, stageSelectSprite.texNumber, spritecommon);
+	//サイズ
+	stageSelectSprite.size = { 500,65 };
+	//位置
+	stageSelectSprite.position = { window_width / 4, window_height - window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(stageSelectSprite);
+
+
+	//選択矢印
+	//スプライトに何番のテクスチャを使うか
+	arrowSprite.texNumber = 9;
+	//スプライトの生成
+	arrowSprite = SpriteCreate(device.Get(), window_width, window_height, arrowSprite.texNumber, spritecommon);
+	//サイズ
+	arrowSprite.size = { 65,65 };
+	//位置
+	arrowSprite.position = { window_width / 4 - 100, window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(arrowSprite);
+
+	//操作説明
+	//スプライトに何番のテクスチャを使うか
+	tutorialSprite.texNumber = 10;
+	//スプライトの生成
+	tutorialSprite = SpriteCreate(device.Get(), window_width, window_height, tutorialSprite.texNumber, spritecommon);
+	//サイズ
+	tutorialSprite.size = { 750,400 };
+	//位置
+	tutorialSprite.position = { window_width / 4 - 100, window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(tutorialSprite);
+
+	//ゲームオーバー
+	//スプライトに何番のテクスチャを使うか
+	gameoverSprite.texNumber = 11;
+	//スプライトの生成
+	gameoverSprite = SpriteCreate(device.Get(), window_width, window_height, gameoverSprite.texNumber, spritecommon);
+	//サイズ
+	gameoverSprite.size = { 1030,145 };
+	//位置
+	gameoverSprite.position = { window_width / 4 - 200, window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(gameoverSprite);
+
+	//リスタート
+	//スプライトに何番のテクスチャを使うか
+	restartSprite.texNumber = 12;
+	//スプライトの生成
+	restartSprite = SpriteCreate(device.Get(), window_width, window_height, restartSprite.texNumber, spritecommon);
+	//サイズ
+	restartSprite.size = { 310,65 };
+	//位置
+	restartSprite.position = { window_width / 4 - 100, window_height - window_height / 4 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(restartSprite);
+
+	//ステージクリア
+	//スプライトに何番のテクスチャを使うか
+	stageClearSprite.texNumber = 13;
+	//スプライトの生成
+	stageClearSprite = SpriteCreate(device.Get(), window_width, window_height, stageClearSprite.texNumber, spritecommon);
+	//サイズ
+	stageClearSprite.size = { 1030,145 };
+	//位置
+	stageClearSprite.position = { window_width / 5 - 100,  window_height / 3 ,0 };
+	//頂点バッファに反映
+	SpriteTransferVertexBuffer(stageClearSprite);
+
+	////ブロック/////
+
+	//3Dオブジェクトの数
+	const size_t kObjectCount = 1;
+	//3Dオブジェクトの配列
+	Object3d player;
+
+	const size_t BlockCount = 1000;
+	Object3d blocks[BlockCount];
+
+	const float blockSize = 5.0f;
+	//オブジェクトの配置
+	for (int i = 0; i < _countof(blocks); i++)
+	{
+		InitializeObject3d(&blocks[i], device.Get());
+		blocks[i].position = { 0.0f,0.0f,-100.0f };
+		blocks[i].scale = { blockSize,blockSize,blockSize };
+	}
+
+	//ステージ
+	int stage = 0;
+
+	//シーン
+	Scene scene = title;
+
+	//ステージ選択
+	bool isStageSerect = false;
+
+	//スタートしたか
+	bool isStart = false;
+	//クリアしたか
+	bool isClear = false;
+
+	//タイトルに戻るか
+	bool goTitle = false;
+
+	//初期化
+	InitializeObject3d(&player, device.Get());
+	player.position.z = 50;
+
+
 
 	//キャラクターの移動ベクトル
 	XMFLOAT3 move = { 0, 0, 0 };
@@ -1601,122 +1909,6 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	constMapMaterial->color = XMFLOAT4(1, 1, 1, 1.0f);              // RGBAで半透明の赤
 
 
-	//3Dオブジェクトの数
-	const size_t kObjectCount = 1;
-	//3Dオブジェクトの配列
-	Object3d object3ds[kObjectCount];
-
-	const size_t BlockCount = 1000;
-	Object3d blocks[BlockCount];
-
-	const float blockSize = 5.0f;
-	//オブジェクトの配置
-	for (int i = 0; i < _countof(blocks); i++)
-	{
-		InitializeObject3d(&blocks[i], device.Get());
-		blocks[i].position = { 0.0f,0.0f,-100.0f };
-		blocks[i].scale = { blockSize,blockSize,blockSize };
-	}
-
-	blocks[0].position = { blockSize * 0,blockSize * 10,blockSize * 50 };
-	blocks[1].position = { blockSize * 0,blockSize * -10,blockSize * 50 };
-
-	blocks[2].position = { blockSize * 10,blockSize * 0,blockSize * 100 };
-	blocks[3].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
-
-	blocks[4].position = { blockSize * -10,blockSize * 10,blockSize * 150 };
-	blocks[5].position = { blockSize * 0,blockSize * 10,blockSize * 150 };
-	blocks[6].position = { blockSize * 10,blockSize * 10,blockSize * 150 };
-	blocks[7].position = { blockSize * 10,blockSize * 0,blockSize * 150 };
-	blocks[8].position = { blockSize * 10,blockSize * -10,blockSize * 150 };
-	blocks[9].position = { blockSize * 0,blockSize * -10,blockSize * 150 };
-	blocks[10].position = { blockSize * -10,blockSize * -10,blockSize * 150 };
-	blocks[11].position = { blockSize * -10,blockSize * 0,blockSize * 150 };
-
-	blocks[12].position = { blockSize * 0,blockSize * 10,blockSize * 200 };
-	blocks[13].position = { blockSize * 0,blockSize * 0,blockSize * 200 };
-	blocks[14].position = { blockSize * 0,blockSize * -10,blockSize * 200 };
-
-	blocks[15].position = { blockSize * 10,blockSize * 0,blockSize * 250 };
-	blocks[16].position = { blockSize * 0,blockSize * 0,blockSize * 250 };
-	blocks[17].position = { blockSize * -10,blockSize * 0,blockSize * 250 };
-
-	blocks[18].position = { blockSize * -10,blockSize * 10,blockSize * 300 };
-	blocks[19].position = { blockSize * 0,blockSize * 0,blockSize * 300 };
-	blocks[20].position = { blockSize * 10,blockSize * -10,blockSize * 300 };
-
-	blocks[21].position = { blockSize * 10,blockSize * 10,blockSize * 330 };
-	blocks[22].position = { blockSize * 0,blockSize * 0,blockSize * 330 };
-	blocks[23].position = { blockSize * -10,blockSize * -10,blockSize * 330 };
-
-	blocks[24].position = { blockSize * -10,blockSize * 10,blockSize * 360 };
-	blocks[25].position = { blockSize * 10,blockSize * -10,blockSize * 360 };
-	blocks[26].position = { blockSize * 10,blockSize * 10,blockSize * 360 };
-	blocks[27].position = { blockSize * 0,blockSize * 0,blockSize * 360 };
-	blocks[28].position = { blockSize * -10,blockSize * -10,blockSize * 360 };
-
-	blocks[29].position = { blockSize * 5,blockSize * 5,blockSize * 450 };
-	blocks[30].position = { blockSize * 5,blockSize * -5,blockSize * 480 };
-	blocks[31].position = { blockSize * -5,blockSize * -5,blockSize * 510 };
-	blocks[32].position = { blockSize * -5,blockSize * 5,blockSize * 540 };
-
-	blocks[33].position = { blockSize * -5,blockSize * 5,blockSize * 600 };
-	blocks[34].position = { blockSize * 5,blockSize * -5,blockSize * 600 };
-
-	blocks[35].position = { blockSize * -5,blockSize * -5,blockSize * 630 };
-	blocks[36].position = { blockSize * 5,blockSize * 5,blockSize * 630 };
-
-	blocks[37].position = { blockSize * -5,blockSize * 5,blockSize * 660 };
-	blocks[38].position = { blockSize * 5,blockSize * 5,blockSize * 660 };
-
-	blocks[39].position = { blockSize * 5,blockSize * -5,blockSize * 690 };
-	blocks[40].position = { blockSize * -5,blockSize * -5,blockSize * 690 };
-
-	blocks[41].position = { blockSize * 5,blockSize * -5,blockSize * 750 };
-	blocks[42].position = { blockSize * 5,blockSize * 5,blockSize * 750 };
-	blocks[43].position = { blockSize * -5,blockSize * 5,blockSize * 750 };
-
-	blocks[44].position = { blockSize * 5,blockSize * -5,blockSize * 800 };
-	blocks[45].position = { blockSize * -5,blockSize * -5,blockSize * 800 };
-	blocks[46].position = { blockSize * -5,blockSize * 5,blockSize * 800 };
-
-	for (int i = 47; i < 97; i++) {
-		blocks[i].position = { blockSize * 5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 50].position = { blockSize * -5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 100].position = { blockSize * 5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 150].position = { blockSize * -5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
-
-		blocks[i + 200].position = { blockSize * 15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 250].position = { blockSize * 15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 300].position = { blockSize * -15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 350].position = { blockSize * -15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
-
-		blocks[i + 400].position = { blockSize * -15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 450].position = { blockSize * -15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 500].position = { blockSize * 15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
-		blocks[i + 550].position = { blockSize * 15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
-	}
-
-	for (int i = 0; i < _countof(object3ds); i++) {
-		//初期化
-		InitializeObject3d(&object3ds[i], device.Get());
-
-		////ここから↓は親子構造のサンプル
-		////先頭以外なら
-		//if (i > 0) {
-		//	//一つ前のオブジェクトを親オブジェクトとする
-		//	object3ds[i].parent = &object3ds[i - 1];
-		//	//親オブジェクトの9割の大きさ
-		//	object3ds[i].scale = { 0.9f,0.9f,0.9f };
-		//	//親オブジェクトに対してZ軸周りに30度回転
-		//	object3ds[i].rotation = { 0.0f,0.0f,XMConvertToRadians(30.0f) };
-
-		//	//親オブジェクトに対してZ方向-8.0ずらす
-		//	object3ds[i].position = { 0.0f,0.0f,-8.0f };
-		//}
-	}
-
-	object3ds[0].position.z = 50;
 	////平行投影行列の計算
 	//constMapTransform->mat = XMMatrixOrthographicOffCenterLH(
 	//0.0f,window_width,
@@ -1777,7 +1969,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	ScratchImage scratchImg{};
 	// WICテクスチャのロード
 	result = LoadFromWICFile(
-		L"Resources/mario.jpg",   //「Resources」フォルダの「lavender.jpg」
+		L"Resources/player.jpg",   //「Resources」フォルダの「lavender.jpg」
 		WIC_FLAGS_NONE,
 		&metadata, scratchImg);
 
@@ -1984,28 +2176,36 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 	//描画初期化処理 ここまで
 
 
+	// 音声再生
+	SoundPlayWave(xAudio2.Get(), soundData1);
+
+
 	//ゲームループ
 	while (true) {
-		//メッセージがある？
-		if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-			TranslateMessage(&msg);	//キー入力メッセージの処理
-			DispatchMessage(&msg);	//プロシージャにメッセージを送る
-		}
 
-		//×ボタンで終了メッセージが来たらゲームループを抜ける
-		if (msg.message == WM_QUIT) {
+		//Windowsのメッセージ処理
+		if (winapp->ProcessMesseage()) {
+			//ゲームループを抜ける
 			break;
 		}
+		////メッセージがある？
+		//if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+		//	TranslateMessage(&msg);	//キー入力メッセージの処理
+		//	DispatchMessage(&msg);	//プロシージャにメッセージを送る
+		//}
+
+		////×ボタンで終了メッセージが来たらゲームループを抜ける
+		//if (msg.message == WM_QUIT) {
+		//	break;
+		//}
 		//DirectX毎フレーム処理 ここから
 
 		// キーボード情報の取得開始
-		keyboard->Acquire();
+		input->Update();
 
 		// 全キーの入力状態を取得する
-		BYTE key[256] = {};
-		keyboard->GetDeviceState(sizeof(key), key);
-
-
+		//BYTE key[256] = {};
+		//keyboard->GetDeviceState(sizeof(key), key);
 
 		// バックバッファの番号を取得(2つなので0番か1番)
 		UINT bbIndex = swapChain->GetCurrentBackBufferIndex();
@@ -2024,13 +2224,10 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 		D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap->GetCPUDescriptorHandleForHeapStart();
 		commandList->OMSetRenderTargets(1, &rtvHandle, false, &dsvHandle);
 
-
-
-
 		// 3.画面クリア R G B A
-		FLOAT clearColor[] = { 0.1f,0.25f, 0.5f,0.0f }; // 青っぽい色
+		FLOAT clearColor[] = { 0.0f,0.0f, 0.1f,0.0f }; // 青っぽい色
 		//スペースキーが押されたら
-		if (key[DIK_SPACE]) {
+		if (input->PushKey(DIK_SPACE)) {
 			//clearColor[0] = { 0.7f };
 		}
 		commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
@@ -2064,138 +2261,581 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 			vertMap[i] = vertices[i]; // 座標をコピー
 		}
 
-
-
-		//カメラ
-		//if (key[DIK_Z] || key[DIK_X]) {
-		//	if (key[DIK_Z]) {
-		//		angle += XMConvertToRadians(1.0f);
-		//	}
-		//	else if (key[DIK_X]) {
-		//		angle -= XMConvertToRadians(1.0f);
-		//	}
-		//	//angleラジアンだけY軸周りに回転。半径は-100
-		//	eye.x = -200 * sinf(angle);
-		//	eye.z = -200 * cosf(angle);
-		//	//ビュー変換行列
-		//	matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-		//}
-
 		//キャラクターのスピード
 		const float charaSpeed = 1.0f;
-		//キーボード入力による移動処理	
-		isUp = 0;
-
-		if (key[DIK_LEFT] || key[DIK_A]) {
-			move = { -charaSpeed, 0, 0 };
-		}
-		else if (key[DIK_RIGHT] || key[DIK_D]) {
-			move = { +charaSpeed, 0, 0 };
-		}
-		else {
-			move = { 0,0,0 };
-		}
-
-		if (key[DIK_SPACE]) {
-
-			if (upSpeed <= 1.5) {
-				upSpeed += 0.1f;
-			}
-		}
-		else {
-
-			if (upSpeed > -1.5) {
-				upSpeed -= 0.1f;
-			}
-			else {
-				upSpeed = -1.5f;
-			}
-		}
-
-
-
-		object3ds[0].position.y += upSpeed;
-
-		object3ds[0].position.x += move.x;
-		object3ds[0].position.y += move.y;
-		object3ds[0].position.z += move.z;
-
-		if (isDead == false) {
-			eye.z += 1.0f;
-			target.z += 1.0f;
-			matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-		}
-		else {
-
-		}
-
-
-		//座標操作
-		object3ds[0].position.z += 1.0f;
-
-		for (size_t i = 0; i < _countof(object3ds); i++)
-		{
-			UpdateObject3d(&object3ds[i], matView, matProjection);
-		}
-
-		for (size_t i = 0; i < _countof(blocks); i++)
-		{
-			UpdateObject3d(&blocks[i], matView, matProjection);
-		}
 
 		//画面外の処理
 		const float posLimitX = 60;
-		const float posLimitY = 60;
-		//x座標
-		if (object3ds[0].position.x > posLimitX) {
-			object3ds[0].position.x = posLimitX;
-		}
-		else if (object3ds[0].position.x < -posLimitX) {
-			object3ds[0].position.x = -posLimitX;
-		}
-		//y座標
-		if (object3ds[0].position.y > posLimitY) {
-			object3ds[0].position.y = posLimitY;
-		}
-		else if (object3ds[0].position.y < -posLimitY) {
-			object3ds[0].position.y = -posLimitY;
-		}
+		const float posLimitUp = 60;
+		const float posLimitBottom = 80;
 
-		//リセット
-		if (key[DIK_R]) {
-			object3ds[0].position.x = 0;
-			object3ds[0].position.y = 0;
-			object3ds[0].position.z = 50;
-
-			isDead = false;
-			eye.z = -100;
-			target.z = 0;
-			matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
-		}
-
-
-		//当たり判定
-		for (size_t i = 0; i < _countof(blocks); i++)
+		switch (scene)
 		{
-			if (CheakCollision(object3ds[0].position, blocks[i].position, object3ds[0].scale, blocks[i].scale))
+		case title:
+			if (isStageSerect == false) {
+				SpriteUpdate(pushSpaceSprite, spritecommon);
+			}
+			//ステージ選択からゲーム画面へ
+			if (isStageSerect == true)
 			{
-				object3ds[0].position.x = 1000;
-				object3ds[0].position.y = 1000;
-				object3ds[0].position.z = -1000;
-				isDead = true;
+
+
+				//player.position.y = -40;
+				//A,Dでステージ切り替え
+				if (stage > 0 && (input->TriggerKey(DIK_A) || input->TriggerKey(DIK_LEFT))) {
+					stage--;
+					arrowSprite.position.x -= 250;
+					//player.position.x -= 20;
+				}
+				else if (stage < 4 && (input->TriggerKey(DIK_D) || input->TriggerKey(DIK_RIGHT))) {
+					stage++;
+					arrowSprite.position.x += 250;
+					//player.position.x += 20;
+				}
+				stageSelectSprite.position = { window_width / 3,  window_height / 3 ,0 };
+				SpriteUpdate(backGroundSprite, spritecommon);
+				for (int i = 0; i < 5; i++) {
+					SpriteUpdate(numberSprite[i], spritecommon);
+				}
+				SpriteUpdate(stageSelectSprite, spritecommon);
+				SpriteUpdate(arrowSprite, spritecommon);
+
+				//スペースキーでゲーム画面へ
+				if (input->TriggerKey(DIK_SPACE))
+				{
+					isStart = false;
+					scene = game;
+					player.position.x = 0;
+					player.position.y = 0;
+					player.position.z = 50;
+
+					isDead = false;
+					eye.z = -120;
+					target.z = 0;
+					matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+
+					for (int i = 0; i < _countof(blocks); i++)
+					{
+						blocks[i].position = { 0.0f,0.0f,-100.0f };
+					}
+				}
+			}
+			else
+			{
+				//player.position.y = 0;
+				//player.position.x = -40;
+			}
+			//player.position.z = 50;
+
+			//タイトルからステージ選択へ
+			if (input->TriggerKey(DIK_SPACE))
+			{
+				arrowSprite.position = { (window_width / 4 - 300),window_height - window_height / 4 + 20 ,0 };
+				isStageSerect = true;
 			}
 
+			//UpdateObject3d(&player, matView, matProjection);
+			break;
+
+		case game:
+			//キーボード入力による移動処理	
+			isUp = 0;
+
+			//始まる前の説明
+			if (isStart == false) {
+				if (input->TriggerKey(DIK_SPACE)) {
+					isStart = true;
+				}
+				SpriteUpdate(tutorialSprite, spritecommon);
+			}
+
+			else if (isStart == true) {
+
+				if (isClear == false)
+				{
+					//左右移動の処理
+					if ((input->PushKey(DIK_LEFT) || input->PushKey(DIK_A)) && (input->PushKey(DIK_RIGHT) || input->PushKey(DIK_D))) {
+						move = { 0,0,0 };
+					}
+					else if (input->PushKey(DIK_LEFT) || input->PushKey(DIK_A)) {
+						move = { -charaSpeed, 0, 0 };
+					}
+					else if (input->PushKey(DIK_RIGHT) || input->PushKey(DIK_D)) {
+						move = { +charaSpeed, 0, 0 };
+					}
+					else {
+						move = { 0,0,0 };
+					}
+
+					//上下移動の処理
+					if (input->PushKey(DIK_SPACE)) {
+
+						if (upSpeed <= 1.5) {
+							upSpeed += 0.1f;
+						}
+					}
+					else {
+
+						if (upSpeed > -1.5) {
+							upSpeed -= 0.1f;
+						}
+						else {
+							upSpeed = -1.5f;
+						}
+					}
+
+					player.position.y += upSpeed;
+
+					player.position.x += move.x;
+					player.position.y += move.y;
+					player.position.z += move.z;
+				}
+				//クリア
+				else {
+					SpriteUpdate(stageClearSprite, spritecommon);
+					SpriteUpdate(stageSelectSprite, spritecommon);
+					SpriteUpdate(arrowSprite, spritecommon);
+					if (input->TriggerKey(DIK_SPACE)) {
+						scene = title;
+						isClear = false;
+						player.position.x = -40;
+						player.position.z = 0;
+						eye.z = -120;
+						target.z = 0;
+						matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+						stage = 0;
+						stageSelectSprite.position = { window_width / 3,  window_height / 3 ,0 };
+						arrowSprite.position = { (window_width / 4 - 300),window_height - window_height / 4 + 20 ,0 };
+					}
+				}
+				//プレイヤーが死んでいなければ
+				if (isDead == false) {
+					player.position.z += 1.0f;
+					eye.z += 1.0f;
+					target.z += 1.0f;
+					matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+				}
+				else {
+					player.position.x = 1000;
+					player.position.y = 1000;
+					player.position.z = -1000;
+				}
+
+				//座標操作
+				UpdateObject3d(&player, matView, matProjection);
+
+				for (size_t i = 0; i < _countof(blocks); i++)
+				{
+					UpdateObject3d(&blocks[i], matView, matProjection);
+				}
+
+				//画面外の処理
+
+				//x座標
+				if (player.position.x > posLimitX) {
+					player.position.x = posLimitX;
+				}
+				else if (player.position.x < -posLimitX) {
+					player.position.x = -posLimitX;
+				}
+				//y座標
+				if (player.position.y > posLimitUp) {
+					player.position.y = posLimitUp;
+				}
+				else if (player.position.y < -posLimitBottom) {
+					arrowSprite.position = { window_width / 4 - 200, window_height - window_height / 4 ,0 };
+					isDead = true;
+				}
+
+				//ゲームオーバーからタイトルへ
+				if (isDead == true) {
+
+					stageSelectSprite.position = { window_width / 2, window_height - window_height / 4,0 };
+
+
+
+					if (input->TriggerKey(DIK_LEFT) || input->TriggerKey(DIK_A)) {
+						goTitle = false;
+						arrowSprite.position = { window_width / 4 - 200, window_height - window_height / 4 ,0 };
+					}
+					if (input->TriggerKey(DIK_RIGHT) || input->TriggerKey(DIK_D)) {
+						goTitle = true;
+						arrowSprite.position = { window_width / 2 - 100, window_height - window_height / 4 ,0 };
+					}
+
+					SpriteUpdate(gameoverSprite, spritecommon);
+					SpriteUpdate(restartSprite, spritecommon);
+					SpriteUpdate(stageSelectSprite, spritecommon);
+					SpriteUpdate(arrowSprite, spritecommon);
+
+					if (input->TriggerKey(DIK_SPACE))
+					{
+						if (goTitle == true)
+						{
+							scene = title;
+							player.position.x = -40;
+							player.position.z = 0;
+							goTitle = false;
+							stage = 0;
+							arrowSprite.position = { (window_width / 4 - 300),window_height - window_height / 4 + 20 ,0 };
+						}
+						else {
+							player.position.x = 0;
+							player.position.y = 0;
+							player.position.z = 50;
+
+							isDead = false;
+						}
+
+						eye.z = -120;
+						target.z = 0;
+						matView = XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up));
+					}
+
+
+
+				}
+
+				//当たり判定
+				for (size_t i = 0; i < _countof(blocks); i++)
+				{
+					if (CheakCollision(player.position, blocks[i].position, player.scale, blocks[i].scale))
+					{
+						arrowSprite.position = { window_width / 4 - 200, window_height - window_height / 4 ,0 };
+						isDead = true;
+					}
+
+				}
+
+				break;
+			}
 		}
-		//スプライトの更新
-		for (int i = 0; i < spriteMax; i++) {
-			SpriteUpdate(sprite[i], spritecommon);
+
+		//ステージ
+		if (stage == 0)
+		{
+			blocks[0].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
+			blocks[1].position = { blockSize * 10,blockSize * 0,blockSize * 150 };
+			blocks[2].position = { blockSize * 0,blockSize * 0,blockSize * 200 };
+
+			blocks[3].position = { blockSize * 0,blockSize * 10,blockSize * 250 };
+			blocks[4].position = { blockSize * 0,blockSize * -10,blockSize * 300 };
+
+			blocks[5].position = { blockSize * 5,blockSize * 5,blockSize * 350 };
+			blocks[6].position = { blockSize * -5,blockSize * -5,blockSize * 400 };
+
+			blocks[7].position = { blockSize * 5,blockSize * -5,blockSize * 450 };
+			blocks[8].position = { blockSize * -5,blockSize * 5,blockSize * 500 };
+
+			blocks[9].position = { blockSize * 10,blockSize * 10,blockSize * 550 };
+			blocks[10].position = { blockSize * 10,blockSize * 0,blockSize * 550 };
+			blocks[11].position = { blockSize * 10,blockSize * -10,blockSize * 550 };
+
+			blocks[24].position = { blockSize * -10,blockSize * 10,blockSize * 550 };
+			blocks[25].position = { blockSize * -10,blockSize * 0,blockSize * 550 };
+			blocks[26].position = { blockSize * -10,blockSize * -10,blockSize * 550 };
+
+			blocks[12].position = { blockSize * -15,blockSize * -15,blockSize * 600 };
+			blocks[13].position = { blockSize * -15,blockSize * -5,blockSize * 600 };
+			blocks[14].position = { blockSize * -15,blockSize * 5,blockSize * 600 };
+			blocks[15].position = { blockSize * -15,blockSize * 15,blockSize * 600 };
+			blocks[16].position = { blockSize * -5,blockSize * 15,blockSize * 600 };
+			blocks[17].position = { blockSize * 5,blockSize * 15,blockSize * 600 };
+			blocks[18].position = { blockSize * 15,blockSize * 15,blockSize * 600 };
+			blocks[19].position = { blockSize * 15,blockSize * 5,blockSize * 600 };
+			blocks[20].position = { blockSize * 15,blockSize * -5,blockSize * 600 };
+			blocks[21].position = { blockSize * 15,blockSize * -15,blockSize * 600 };
+			blocks[22].position = { blockSize * 5,blockSize * -15,blockSize * 600 };
+			blocks[23].position = { blockSize * -5,blockSize * -15,blockSize * 600 };
+
+			if (player.position.z > blockSize * 650)
+			{
+				isClear = true;
+				stageSelectSprite.position = { window_width / 3,  window_height - window_height / 3 ,0 };
+				arrowSprite.position = { window_width / 3 - 100,  window_height - window_height / 3 ,0 };
+			}
+		}
+		else if (stage == 1) {
+			blocks[0].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
+			blocks[1].position = { blockSize * 10,blockSize * 0,blockSize * 100 };
+			blocks[2].position = { blockSize * 0,blockSize * 0,blockSize * 100 };
+			blocks[3].position = { blockSize * 0,blockSize * 10,blockSize * 100 };
+			blocks[4].position = { blockSize * 0,blockSize * -10,blockSize * 100 };
+
+			blocks[5].position = { blockSize * 10,blockSize * 10,blockSize * 200 };
+			blocks[6].position = { blockSize * 10,blockSize * -10,blockSize * 200 };
+			blocks[7].position = { blockSize * 0,blockSize * 0,blockSize * 200 };
+			blocks[8].position = { blockSize * -10,blockSize * 10,blockSize * 200 };
+			blocks[9].position = { blockSize * -10,blockSize * -10,blockSize * 200 };
+
+			blocks[10].position = { blockSize * 20,blockSize * 10,blockSize * 300 };
+			blocks[11].position = { blockSize * 20,blockSize * 0,blockSize * 300 };
+			blocks[12].position = { blockSize * 20,blockSize * -10,blockSize * 300 };
+			blocks[13].position = { blockSize * 10,blockSize * 10,blockSize * 300 };
+			blocks[14].position = { blockSize * 10,blockSize * 0,blockSize * 300 };
+			blocks[15].position = { blockSize * 10,blockSize * -10,blockSize * 300 };
+			blocks[16].position = { blockSize * 0,blockSize * 10,blockSize * 300 };
+			blocks[17].position = { blockSize * 0,blockSize * 0,blockSize * 300 };
+			blocks[18].position = { blockSize * 0,blockSize * -10,blockSize * 300 };
+
+			blocks[19].position = { blockSize * -20,blockSize * 10,blockSize * 350 };
+			blocks[20].position = { blockSize * -20,blockSize * 0,blockSize * 350 };
+			blocks[21].position = { blockSize * -20,blockSize * -10,blockSize * 350 };
+			blocks[22].position = { blockSize * -10,blockSize * 10,blockSize * 350 };
+			blocks[23].position = { blockSize * -10,blockSize * 0,blockSize * 350 };
+			blocks[24].position = { blockSize * -10,blockSize * -10,blockSize * 350 };
+			blocks[25].position = { blockSize * 0,blockSize * 10,blockSize * 350 };
+			blocks[26].position = { blockSize * 0,blockSize * 0,blockSize * 350 };
+			blocks[27].position = { blockSize * 0,blockSize * -10,blockSize * 350 };
+
+			blocks[28].position = { blockSize * 10,blockSize * 10,blockSize * 450 };
+			blocks[29].position = { blockSize * 10,blockSize * 0,blockSize * 450 };
+			blocks[30].position = { blockSize * 10,blockSize * -10,blockSize * 450 };
+			blocks[31].position = { blockSize * 0,blockSize * 10,blockSize * 450 };
+			blocks[32].position = { blockSize * 0,blockSize * 0,blockSize * 450 };
+			blocks[33].position = { blockSize * -10,blockSize * 10,blockSize * 450 };
+
+			blocks[34].position = { blockSize * -10,blockSize * 10,blockSize * 500 };
+			blocks[35].position = { blockSize * -10,blockSize * 0,blockSize * 500 };
+			blocks[36].position = { blockSize * -10,blockSize * -10,blockSize * 500 };
+			blocks[37].position = { blockSize * 0,blockSize * -10,blockSize * 500 };
+			blocks[38].position = { blockSize * 0,blockSize * 0,blockSize * 500 };
+			blocks[39].position = { blockSize * 10,blockSize * -10,blockSize * 500 };
+
+			blocks[40].position = { blockSize * 10,blockSize * 10,blockSize * 550 };
+			blocks[41].position = { blockSize * 10,blockSize * 0,blockSize * 550 };
+			blocks[42].position = { blockSize * -10,blockSize * -10,blockSize * 550 };
+			blocks[43].position = { blockSize * 0,blockSize * -10,blockSize * 550 };
+			blocks[44].position = { blockSize * 0,blockSize * 0,blockSize * 550 };
+			blocks[45].position = { blockSize * 10,blockSize * -10,blockSize * 550 };
+
+			blocks[46].position = { blockSize * 10,blockSize * 10,blockSize * 600 };
+			blocks[47].position = { blockSize * -10,blockSize * 0,blockSize * 600 };
+			blocks[48].position = { blockSize * -10,blockSize * -10,blockSize * 600 };
+			blocks[49].position = { blockSize * 0,blockSize * 10,blockSize * 600 };
+			blocks[50].position = { blockSize * 0,blockSize * 0,blockSize * 600 };
+			blocks[51].position = { blockSize * -10,blockSize * 10,blockSize * 600 };
+
+			if (player.position.z > blockSize * 650)
+			{
+				isClear = true;
+				stageSelectSprite.position = { window_width / 3,  window_height - window_height / 3 ,0 };
+				arrowSprite.position = { window_width / 3 - 100,  window_height - window_height / 3 ,0 };
+			}
+		}
+		else if (stage == 2) {
+			blocks[0].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
+			blocks[1].position = { blockSize * 10,blockSize * 0,blockSize * 100 };
+			blocks[2].position = { blockSize * 0,blockSize * 0,blockSize * 100 };
+
+			blocks[3].position = { blockSize * -10,blockSize * -10,blockSize * 150 };
+			blocks[4].position = { blockSize * -10,blockSize * 0,blockSize * 150 };
+			blocks[5].position = { blockSize * -10,blockSize * 10,blockSize * 150 };
+
+			blocks[6].position = { blockSize * 0,blockSize * -10,blockSize * 175 };
+			blocks[7].position = { blockSize * 0,blockSize * 0,blockSize * 175 };
+			blocks[8].position = { blockSize * 0,blockSize * 10,blockSize * 175 };
+
+			blocks[9].position = { blockSize * 10,blockSize * -10,blockSize * 200 };
+			blocks[10].position = { blockSize * 10,blockSize * 0,blockSize * 200 };
+			blocks[11].position = { blockSize * 10,blockSize * 10,blockSize * 200 };
+
+			blocks[12].position = { blockSize * 10,blockSize * -10,blockSize * 200 };
+			blocks[13].position = { blockSize * 10,blockSize * 0,blockSize * 200 };
+			blocks[14].position = { blockSize * 10,blockSize * 10,blockSize * 200 };
+
+			blocks[15].position = { blockSize * -15,blockSize * -15,blockSize * 250 };
+			blocks[16].position = { blockSize * -15,blockSize * -5,blockSize * 250 };
+			blocks[17].position = { blockSize * -15,blockSize * 5,blockSize * 250 };
+			blocks[18].position = { blockSize * -15,blockSize * 15,blockSize * 250 };
+			blocks[19].position = { blockSize * -5,blockSize * 15,blockSize * 250 };
+			blocks[20].position = { blockSize * 5,blockSize * 15,blockSize * 250 };
+			blocks[21].position = { blockSize * 15,blockSize * 15,blockSize * 250 };
+			blocks[22].position = { blockSize * 15,blockSize * 5,blockSize * 250 };
+			blocks[23].position = { blockSize * 15,blockSize * -5,blockSize * 250 };
+			blocks[24].position = { blockSize * 15,blockSize * -15,blockSize * 250 };
+			blocks[25].position = { blockSize * 5,blockSize * -15,blockSize * 250 };
+			blocks[26].position = { blockSize * -5,blockSize * -15,blockSize * 250 };
+
+			blocks[27].position = { blockSize * 5,blockSize * -5,blockSize * 300 };
+			blocks[28].position = { blockSize * 5,blockSize * 5,blockSize * 300 };
+			blocks[29].position = { blockSize * -5,blockSize * 5,blockSize * 300 };
+			blocks[30].position = { blockSize * -5,blockSize * -5,blockSize * 300 };
+
+			for (int i = 31; i < 48; i++) {
+				blocks[i].position = { blockSize * 0,blockSize * 0,blockSize * 400 + (50 * (i - 31)) };
+			}
+
+			blocks[51].position = { blockSize * 0,blockSize * 10,blockSize * 400 };
+			blocks[52].position = { blockSize * 10,blockSize * 10,blockSize * 410 };
+			blocks[53].position = { blockSize * 10,blockSize * 0,blockSize * 420 };
+			blocks[54].position = { blockSize * 10,blockSize * -10,blockSize * 430 };
+			blocks[55].position = { blockSize * 0,blockSize * -10,blockSize * 440 };
+			blocks[56].position = { blockSize * -10,blockSize * -10,blockSize * 450 };
+			blocks[57].position = { blockSize * -10,blockSize * 0,blockSize * 460 };
+			blocks[58].position = { blockSize * -10,blockSize * 10,blockSize * 470 };
+
+			blocks[59].position = { blockSize * 0,blockSize * 10,blockSize * 480 };
+			blocks[60].position = { blockSize * 10,blockSize * 10,blockSize * 490 };
+			blocks[61].position = { blockSize * 10,blockSize * 0,blockSize * 500 };
+			blocks[62].position = { blockSize * 10,blockSize * -10,blockSize * 510 };
+			blocks[63].position = { blockSize * 0,blockSize * -10,blockSize * 520 };
+			blocks[64].position = { blockSize * -10,blockSize * -10,blockSize * 530 };
+			blocks[65].position = { blockSize * -10,blockSize * 0,blockSize * 540 };
+			blocks[66].position = { blockSize * -10,blockSize * 10,blockSize * 550 };
+
+			if (player.position.z > blockSize * 600)
+			{
+				isClear = true;
+				stageSelectSprite.position = { window_width / 3,  window_height - window_height / 3 ,0 };
+				arrowSprite.position = { window_width / 3 - 100,  window_height - window_height / 3 ,0 };
+			}
+		}
+		else if (stage == 3) {
+			blocks[0].position = { blockSize * 0,blockSize * -10,blockSize * 100 };
+			blocks[1].position = { blockSize * 0,blockSize * 0,blockSize * 100 };
+			blocks[2].position = { blockSize * 0,blockSize * 10,blockSize * 100 };
+
+			blocks[3].position = { blockSize * -10,blockSize * -10,blockSize * 130 };
+			blocks[4].position = { blockSize * -10,blockSize * 0,blockSize * 130 };
+			blocks[5].position = { blockSize * -10,blockSize * 10,blockSize * 130 };
+
+			blocks[6].position = { blockSize * 10,blockSize * -10,blockSize * 160 };
+			blocks[7].position = { blockSize * 10,blockSize * 0,blockSize * 160 };
+			blocks[8].position = { blockSize * 10,blockSize * 10,blockSize * 160 };
+
+			blocks[9].position = { blockSize * 0,blockSize * -10,blockSize * 190 };
+			blocks[10].position = { blockSize * 0,blockSize * 0,blockSize * 190 };
+			blocks[11].position = { blockSize * 0,blockSize * 10,blockSize * 190 };
+
+			blocks[12].position = { blockSize * 10,blockSize * -10,blockSize * 220 };
+			blocks[13].position = { blockSize * 10,blockSize * 0,blockSize * 220 };
+			blocks[14].position = { blockSize * 10,blockSize * 10,blockSize * 220 };
+
+			for (int i = 15; i < 25; i++) {
+				blocks[i].position = { blockSize * 0,blockSize * -10,blockSize * 250 + (50 * (i - 15)) };
+				blocks[i + 10].position = { blockSize * 0,blockSize * 10,blockSize * 250 + (50 * (i - 15)) };
+			}
+
+			blocks[35].position = { blockSize * -10,blockSize * -10,blockSize * 250 };
+			blocks[36].position = { blockSize * -10,blockSize * 0,blockSize * 250 };
+			blocks[37].position = { blockSize * -10,blockSize * 10,blockSize * 250 };
+
+			blocks[38].position = { blockSize * 10,blockSize * -10,blockSize * 300 };
+			blocks[39].position = { blockSize * 10,blockSize * 0,blockSize * 300 };
+			blocks[40].position = { blockSize * 10,blockSize * 10,blockSize * 300 };
+
+			blocks[41].position = { blockSize * -10,blockSize * -10,blockSize * 350 };
+			blocks[42].position = { blockSize * -10,blockSize * 0,blockSize * 350 };
+			blocks[43].position = { blockSize * -10,blockSize * 10,blockSize * 350 };
+
+			for (int i = 44; i < 44 + 40; i++) {
+				blocks[i].position = { blockSize * 0,blockSize * -20,blockSize + (50 * (i - 44)) };
+				blocks[i + 50].position = { blockSize * 10,blockSize * -20,blockSize + (50 * (i - 44)) };
+				blocks[i + 100].position = { blockSize * -10,blockSize * -20,blockSize + (50 * (i - 44)) };
+			}
+
+			if (player.position.z > blockSize + (50 * 41))
+			{
+				isClear = true;
+				stageSelectSprite.position = { window_width / 3,  window_height - window_height / 3 ,0 };
+				arrowSprite.position = { window_width / 3 - 100,  window_height - window_height / 3 ,0 };
+			}
+		}
+		else if (stage == 4) {
+			blocks[0].position = { blockSize * 0,blockSize * 10,blockSize * 100 };
+			blocks[1].position = { blockSize * 0,blockSize * -10,blockSize * 100 };
+
+			blocks[2].position = { blockSize * 10,blockSize * 0,blockSize * 100 };
+			blocks[3].position = { blockSize * -10,blockSize * 0,blockSize * 100 };
+
+			blocks[4].position = { blockSize * -10,blockSize * 10,blockSize * 150 };
+			blocks[5].position = { blockSize * 0,blockSize * 10,blockSize * 150 };
+			blocks[6].position = { blockSize * 10,blockSize * 10,blockSize * 150 };
+			blocks[7].position = { blockSize * 10,blockSize * 0,blockSize * 150 };
+			blocks[8].position = { blockSize * 10,blockSize * -10,blockSize * 150 };
+			blocks[9].position = { blockSize * 0,blockSize * -10,blockSize * 150 };
+			blocks[10].position = { blockSize * -10,blockSize * -10,blockSize * 150 };
+			blocks[11].position = { blockSize * -10,blockSize * 0,blockSize * 150 };
+
+			blocks[12].position = { blockSize * 0,blockSize * 10,blockSize * 200 };
+			blocks[13].position = { blockSize * 0,blockSize * 0,blockSize * 200 };
+			blocks[14].position = { blockSize * 0,blockSize * -10,blockSize * 200 };
+
+			blocks[15].position = { blockSize * 10,blockSize * 0,blockSize * 250 };
+			blocks[16].position = { blockSize * 0,blockSize * 0,blockSize * 250 };
+			blocks[17].position = { blockSize * -10,blockSize * 0,blockSize * 250 };
+
+			blocks[18].position = { blockSize * -10,blockSize * 10,blockSize * 300 };
+			blocks[19].position = { blockSize * 0,blockSize * 0,blockSize * 300 };
+			blocks[20].position = { blockSize * 10,blockSize * -10,blockSize * 300 };
+
+			blocks[21].position = { blockSize * 10,blockSize * 10,blockSize * 330 };
+			blocks[22].position = { blockSize * 0,blockSize * 0,blockSize * 330 };
+			blocks[23].position = { blockSize * -10,blockSize * -10,blockSize * 330 };
+
+			blocks[24].position = { blockSize * -10,blockSize * 10,blockSize * 360 };
+			blocks[25].position = { blockSize * 10,blockSize * -10,blockSize * 360 };
+			blocks[26].position = { blockSize * 10,blockSize * 10,blockSize * 360 };
+			blocks[27].position = { blockSize * 0,blockSize * 0,blockSize * 360 };
+			blocks[28].position = { blockSize * -10,blockSize * -10,blockSize * 360 };
+
+			blocks[29].position = { blockSize * 5,blockSize * 5,blockSize * 450 };
+			blocks[30].position = { blockSize * 5,blockSize * -5,blockSize * 480 };
+			blocks[31].position = { blockSize * -5,blockSize * -5,blockSize * 510 };
+			blocks[32].position = { blockSize * -5,blockSize * 5,blockSize * 540 };
+
+			blocks[33].position = { blockSize * -5,blockSize * 5,blockSize * 600 };
+			blocks[34].position = { blockSize * 5,blockSize * -5,blockSize * 600 };
+
+			blocks[35].position = { blockSize * -5,blockSize * -5,blockSize * 630 };
+			blocks[36].position = { blockSize * 5,blockSize * 5,blockSize * 630 };
+
+			blocks[37].position = { blockSize * -5,blockSize * 5,blockSize * 660 };
+			blocks[38].position = { blockSize * 5,blockSize * 5,blockSize * 660 };
+
+			blocks[39].position = { blockSize * 5,blockSize * -5,blockSize * 690 };
+			blocks[40].position = { blockSize * -5,blockSize * -5,blockSize * 690 };
+
+			blocks[41].position = { blockSize * 5,blockSize * -5,blockSize * 750 };
+			blocks[42].position = { blockSize * 5,blockSize * 5,blockSize * 750 };
+			blocks[43].position = { blockSize * -5,blockSize * 5,blockSize * 750 };
+
+			blocks[44].position = { blockSize * 5,blockSize * -5,blockSize * 800 };
+			blocks[45].position = { blockSize * -5,blockSize * -5,blockSize * 800 };
+			blocks[46].position = { blockSize * -5,blockSize * 5,blockSize * 800 };
+
+			for (int i = 47; i < 97; i++) {
+				blocks[i].position = { blockSize * 5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 50].position = { blockSize * -5,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 100].position = { blockSize * 5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 150].position = { blockSize * -5,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+
+				blocks[i + 200].position = { blockSize * 15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 250].position = { blockSize * 15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 300].position = { blockSize * -15,blockSize * 5,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 350].position = { blockSize * -15,blockSize * -5,blockSize * 400 + (50 * (i - 43)) };
+
+				blocks[i + 400].position = { blockSize * -15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 450].position = { blockSize * -15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 500].position = { blockSize * 15,blockSize * 15,blockSize * 400 + (50 * (i - 43)) };
+				blocks[i + 550].position = { blockSize * 15,blockSize * -15,blockSize * 400 + (50 * (i - 43)) };
+
+			}
+
+			if (player.position.z > blockSize * 400 + (50 * 57))
+			{
+				isClear = true;
+				stageSelectSprite.position = { window_width / 3,  window_height - window_height / 3 ,0 };
+				arrowSprite.position = { window_width / 3 - 100,  window_height - window_height / 3 ,0 };
+			}
 		}
 		// 4.描画コマンドここから
 
 		// ビューポート設定コマンド
 		D3D12_VIEWPORT viewport{};
-		viewport.Width = window_width;
-		viewport.Height = window_height;
+		viewport.Width = winapp->window_width;
+		viewport.Height = winapp->window_height;
 		viewport.TopLeftX = 0;
 		viewport.TopLeftY = 0;
 		viewport.MinDepth = 0.0f;
@@ -2205,12 +2845,10 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 		// シザー矩形
 		D3D12_RECT scissorRect{};
-		scissorRect.left = 0;                                       // 切り抜き座標左
-		scissorRect.right = window_width;        // 切り抜き座標右
-		scissorRect.top = 0;                                        // 切り抜き座標上
-		scissorRect.bottom = window_height;		// 切り抜き座標下
-
-
+		scissorRect.left = 0;                           // 切り抜き座標左
+		scissorRect.right = winapp->window_width;		// 切り抜き座標右
+		scissorRect.top = 0;                            // 切り抜き座標上
+		scissorRect.bottom = winapp->window_height;		// 切り抜き座標下
 
 		// シザー矩形設定コマンドを、コマンドリストに積む
 		commandList->RSSetScissorRects(1, &scissorRect);
@@ -2240,35 +2878,84 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 		commandList->IASetIndexBuffer(&ibView);
 
 
-		//全オブジェクトについて処理
-		for (int i = 0; i < _countof(object3ds); i++) {
-			DrawObject3d(&object3ds[i], commandList.Get(), vbView, ibView, _countof(indices));
-		}
-		//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
-		srvGpuHandle.ptr += incrementSize;
-		// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
-		commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
-
-		for (int i = 0; i < _countof(blocks); i++)
+		switch (scene)
 		{
-			if (blocks[i].position.z > eye.z && blocks[i].position.z <= eye.z + 1000) {
-				if (blocks[i].position.x < eye.x + 40 &&
-					blocks[i].position.x > eye.x - 40 &&
-					blocks[i].position.y < eye.y + 40 &&
-					blocks[i].position.y > eye.y - 40 &&
-					blocks[i].position.z < eye.z + 120) {
-					continue;
+		case title:
+			DrawObject3d(&player, commandList.Get(), vbView, ibView, _countof(indices));
+			break;
+		case game:
+			//全オブジェクトについて処理
+			DrawObject3d(&player, commandList.Get(), vbView, ibView, _countof(indices));
+
+			//2枚目を指し示すようにしたSRVのハンドルをルートパラメータ1番に設定
+			srvGpuHandle.ptr += incrementSize;
+			// SRVヒープの先頭にあるSRVをルートパラメータ1番に設定
+			commandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+
+			if (isStart == true) {
+				for (int i = 0; i < _countof(blocks); i++)
+				{
+					if (blocks[i].position.z > eye.z && blocks[i].position.z <= eye.z + 1000) {
+						if (blocks[i].position.x < eye.x + 40 &&
+							blocks[i].position.x > eye.x - 40 &&
+							blocks[i].position.y < eye.y + 40 &&
+							blocks[i].position.y > eye.y - 40 &&
+							blocks[i].position.z < eye.z + 120) {
+							continue;
+						}
+						DrawObject3d(&blocks[i], commandList.Get(), vbView, ibView, _countof(indices));
+					}
 				}
-				DrawObject3d(&blocks[i], commandList.Get(), vbView, ibView, _countof(indices));
 			}
+			break;
+
 		}
 
 		//スプライト共通コマンド
 		SpriteCommonBeginDraw(spritecommon, commandList.Get());
-		//スプライト描画
-		for (int i = 0; i < spriteMax; i++) {
-			SpriteDraw(sprite[i], commandList.Get(), spritecommon, device.Get());
+		switch (scene)
+		{
+		case title:
+			if (isStageSerect == false) {
+				SpriteDraw(titleSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(pushSpaceSprite, commandList.Get(), spritecommon, device.Get());
+			}
+			else if (isStageSerect == true) {
+				SpriteDraw(backGroundSprite, commandList.Get(), spritecommon, device.Get());
+				for (int i = 0; i < 5; i++) {
+					SpriteDraw(numberSprite[i], commandList.Get(), spritecommon, device.Get());
+				}
+				SpriteDraw(stageSelectSprite, commandList.Get(), spritecommon, device.Get());
+
+				SpriteDraw(arrowSprite, commandList.Get(), spritecommon, device.Get());
+			}
+
+
+			break;
+
+		case game:
+
+			//始まる前
+			if (isStart == false) {
+				SpriteDraw(tutorialSprite, commandList.Get(), spritecommon, device.Get());
+			}
+			//死んだ
+			if (isDead == true) {
+				SpriteDraw(gameoverSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(restartSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(stageSelectSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(arrowSprite, commandList.Get(), spritecommon, device.Get());
+			}
+			//クリア
+			if (isClear == true) {
+				SpriteDraw(stageClearSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(stageSelectSprite, commandList.Get(), spritecommon, device.Get());
+				SpriteDraw(arrowSprite, commandList.Get(), spritecommon, device.Get());
+			}
+			break;
 		}
+
+
 		// 4.描画コマンドここまで
 
 		// 5.リソースバリアを戻す
@@ -2308,8 +2995,17 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
 
 		//DirectX毎フレーム処理 ここまで
 	}
+	// XAudio2解放
+	xAudio2.Reset();
+	// 音声データ解放
+	SoundUnload(&soundData1);
 	//ウィンドウクラスを登録解除
-	UnregisterClass(w.lpszClassName, w.hInstance);
+	winapp->Finalize();
+
+	//解放
+	delete winapp;
+
 	return 0;
 }
+
 
